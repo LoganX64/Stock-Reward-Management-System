@@ -34,7 +34,7 @@ func StartPriceUpdater(db *sql.DB) {
 		cron.Recover(cron.DefaultLogger),
 	))
 
-	_, err := c.AddFunc("@every 10s", // "@every 10s" makes it 10 seconds and "0 * * * *" is every hour
+	_, err := c.AddFunc("0 * * * *", // "@every 10s" makes it 10 seconds and "0 * * * *" is every hour
 		func() {
 			updatePrices(db)
 		})

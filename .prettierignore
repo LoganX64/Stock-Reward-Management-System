@@ -1,0 +1,3 @@
+# Ignore Docker Compose files
+docker-compose.yml
+**/docker/*.yml
