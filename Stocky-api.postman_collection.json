@@ -1,0 +1,196 @@
+{
+	"info": {
+		"_postman_id": "c235a993-4879-4cc9-808a-a6a7d07a0b8e",
+		"name": "Stocky-api",
+		"description": "Stocky is a stock rewards management API built in **Golang** using the **Gin** framework and **PostgreSQL**. It allows tracking of rewards in Indian stocks, applying adjustments, and calculating the portfolio value in INR. The system maintains a **double-entry ledger** to track stock units, INR outflows, and company-incurred fees.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "37687945"
+	},
+	"item": [
+		{
+			"name": "GET Requests",
+			"item": [
+				{
+					"name": "Health",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/health",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"health"
+							]
+						},
+						"description": "To health check the API endpoint"
+					},
+					"response": []
+				},
+				{
+					"name": "Historicdata",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/api/v1/historical-inr/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"historical-inr",
+								"1"
+							]
+						},
+						"description": "Get historical INR valuation (before today)."
+					},
+					"response": []
+				},
+				{
+					"name": "gettodaystocks",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/api/v1/today-stocks/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"today-stocks",
+								"1"
+							]
+						},
+						"description": "Fetch rewards for today with adjustments.EndFragment"
+					},
+					"response": []
+				},
+				{
+					"name": "StatsHandler",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/api/v1/stats/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"stats",
+								"1"
+							]
+						},
+						"description": "Get total today rewards and portfolio value."
+					},
+					"response": []
+				},
+				{
+					"name": "portfolio",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/api/v1/portfolio/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"portfolio",
+								"1"
+							]
+						},
+						"description": "Get portfolio details per stock."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "POST Requests",
+			"item": [
+				{
+					"name": "reward",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n  \"user_id\": 1,\r\n  \"stock_symbol\": \"TCS\",\r\n  \"quantity\": 10\r\n}\r\n\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/api/v1/reward",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"reward"
+							]
+						},
+						"description": "Create a reward entry"
+					},
+					"response": []
+				},
+				{
+					"name": "Adjustments",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"adjustment_type\": \"manual_correction\",\r\n    \"delta_quantity\": 25,\r\n    \"delta_amount\": 50,\r\n    \"reason\": \"Correction for wrong reward quantity\"\r\n}\r\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/api/v1/adjustments/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"api",
+								"v1",
+								"adjustments",
+								"1"
+							]
+						},
+						"description": "Apply adjustment to a reward."
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}
