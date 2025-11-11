@@ -25,9 +25,6 @@ WORKDIR /app
 #Copy the binary 
 COPY --from=builder /app/stocky-api .
 
-# Copy the config folder
-COPY config ./config
-
 # Copy migrations folder
 COPY internal/database/migrations ./internal/database/migrations
 
@@ -35,4 +32,4 @@ COPY internal/database/migrations ./internal/database/migrations
 EXPOSE 8080
 
 # Run the API with config file
-CMD ["./stocky-api", "-config", "config/local.yaml"]
+CMD ["./stocky-api"]

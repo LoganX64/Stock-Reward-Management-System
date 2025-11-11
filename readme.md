@@ -70,12 +70,17 @@ The project uses PostgreSQL with the following tables:
 
 ## Running the Project
 
-### Prerequisites:
+### Prerequisites
 
-- Go >= 1.20
-- PostgreSQL
-- Git
-- golang-migrate v4
+- Docker & Docker Compose installed
+
+### Using Docker
+
+1. Build and start the services using Docker Compose:
+
+```bash
+  docker-compose up -d --build
+```
 
 ### Setup Steps:
 
@@ -86,64 +91,19 @@ The project uses PostgreSQL with the following tables:
    cd stocky-api
    ```
 
-2. Create `config/local.yaml` file:
+2. The API will be available at:
 
-   ```yaml
-   env: 'dev'
+   `http://localhost:8080`
 
-   db:
-     host: 'localhost'
-     port: '5432'
-     user: 'your_db_user'
-     password: 'your_db_password'
-     dbname: 'assignment'
-     sslmode: 'disable'
+### Environment Variables (inside Docker)
 
-   http_server:
-     port: ':8080'
-   ```
+The application reads the following environment variables for configuration:
 
-   Note: You can also use environment variables instead of a config file. The config loader checks for:
-
-   - `CONFIG_PATH` environment variable for the config file path
-   - Individual environment variables: `HOST`, `DB_PORT`, `USER`, `PASSWORD`, `DBNAME`, `SSLMODE`, `PORT`
-
-3. Create PostgreSQL database:
-
-   ```sql
-   CREATE DATABASE assignment;
-   ```
-
-4. Run the API:
-
-   You need to provide the config file path either via command-line flag or environment variable:
-
-   **Option 1: Using command-line flag:**
-
-   ```bash
-   go run .\cmd\stocky-api\main.go -config config/local.yaml
-   ```
-
-   **Option 2: Using environment variable:**
-
-   ```bash
-   set CONFIG_PATH=config/local.yaml
-   go run .\cmd\stocky-api\main.go
-   ```
-
-   **On Linux/Mac:**
-
-   ```bash
-   export CONFIG_PATH=config/local.yaml
-   go run ./cmd/stocky-api/main.go
-   ```
-
-5. API will run on:
-   ```
-   http://localhost:8080
-   ```
-
----
+- `DB_HOST` — Database host (PostgreSQL service)
+- `DB_PORT` — Database port (default: 5432)
+- `DB_USER` — PostgreSQL user
+- `DB_PASSWORD` — PostgreSQL password
+- `DB_NAME` — Database name -`PORT` — API port (default: 8080)
 
 ## Code Structure
 
@@ -165,10 +125,56 @@ The project uses PostgreSQL with the following tables:
 - `/internal/utils/` — Utility functions (rounding, JSON helpers).
 - `/internal/jobs/` — Background jobs (price updater).
 - `/internal/database/migrations/` — SQL migrations for tables and schema.
-- `/config/` — Configuration files (local.yaml).
+- `Dockerfile` — Docker image instructions
+- `docker-compose.yml` — Docker Compose setup
 - `Stocky-api.postman_collection.json` — Postman collection for API testing.
 
 ---
+
+## Docker Support
+
+You can run Stocky API using Docker for easy setup and deployment.
+
+# Docker Compose File Example
+
+```
+version: '3.8'
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: your_db_user
+      POSTGRES_PASSWORD: your_db_password
+      POSTGRES_DB: assignment
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: your_db_user
+      DB_PASSWORD: your_db_password
+      DB_NAME: assignment
+      PORT: 8080
+    depends_on:
+      - db
+
+volumes:
+  db-data:
+
+```
+
+# Start services:
+
+```
+docker-compose up -d
+```
 
 ## Response Format
 

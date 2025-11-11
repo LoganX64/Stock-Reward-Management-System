@@ -1,60 +1,59 @@
 package config
 
 import (
-	"flag"
 	"log"
 	"os"
-
-	"github.com/ilyakaznacheev/cleanenv"
 )
 
 type HTTPServer struct {
-	Port string `yaml:"port" env:"PORT" env-default:":8080"`
+	Port string
 }
 
 type Database struct {
-	Host     string `yaml:"host" env:"HOST" env-default:"localhost"`
-	DbPort   string `yaml:"port" env:"DB_PORT" env-default:"5432"`
-	User     string `yaml:"user" env:"USER" env-default:"postgres"`
-	Password string `yaml:"password" env:"PASSWORD" env-default:"password"`
-	DBName   string `yaml:"dbname" env:"DBNAME" env-default:"assignment"`
-	SSLMode  string `yaml:"sslmode" env:"SSLMODE" env-default:"disable"`
+	Host     string
+	DbPort   string
+	User     string
+	Password string
+	DBName   string
+	SSLMode  string
 }
 
 type Config struct {
-	Env        string `yaml:"env"`
-	Database   `yaml:"db"`
-	HTTPServer `yaml:"http_server"`
+	Env        string
+	Database   Database
+	HTTPServer HTTPServer
+}
+
+func LoadFromEnv() *Config {
+	getEnv := func(key, defaultVal string) string {
+		if v, ok := os.LookupEnv(key); ok {
+			return v
+		}
+		return defaultVal
+	}
+
+	cfg := &Config{
+		Env: getEnv("ENV", "dev"),
+		Database: Database{
+			Host:     getEnv("DB_HOST", "localhost"),
+			DbPort:   getEnv("DB_PORT", "5432"),
+			User:     getEnv("POSTGRES_USER", "postgres"),
+			Password: getEnv("POSTGRES_PASSWORD", "password"),
+			DBName:   getEnv("POSTGRES_DB", "assignment"),
+			SSLMode:  getEnv("DB_SSLMODE", "disable"),
+		},
+		HTTPServer: HTTPServer{
+			Port: ":" + getEnv("HTTP_PORT", "8080"),
+		},
+	}
+
+	return cfg
 }
 
 func MustLoad() *Config {
-	var configPath string
-
-	configPath = os.Getenv("CONFIG_PATH")
-
-	if configPath == "" {
-		configFlag := flag.String("config", "", "Path to config file")
-		flag.Parse()
-
-		if *configFlag != "" {
-			configPath = *configFlag
-		}
+	cfg := LoadFromEnv()
+	if cfg == nil {
+		log.Fatal("failed to load config from environment variables")
 	}
-
-	if configPath == "" {
-		log.Fatal("config path not provided")
-	}
-
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		log.Fatalf("config file not found: %s", configPath)
-	}
-
-	var cfg Config
-
-	err := cleanenv.ReadConfig(configPath, &cfg)
-	if err != nil {
-		log.Fatalf("failed to read config: %v", err)
-	}
-
-	return &cfg
+	return cfg
 }

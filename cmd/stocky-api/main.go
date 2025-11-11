@@ -32,13 +32,15 @@ func main() {
 
 	cfg := config.MustLoad()
 
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+	connStr := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Database.Host,
 		cfg.Database.DbPort,
 		cfg.Database.User,
 		cfg.Database.Password,
 		cfg.Database.DBName,
-		cfg.Database.SSLMode)
+		cfg.Database.SSLMode,
+	)
 
 	var err error
 	db, err = sql.Open("postgres", connStr)
@@ -59,7 +61,8 @@ func main() {
 		cfg.Database.Host,
 		cfg.Database.DbPort,
 		cfg.Database.DBName,
-		cfg.Database.SSLMode)
+		cfg.Database.SSLMode,
+	)
 
 	if err := runMigrations(dbURL); err != nil {
 		logrus.Fatalf("failed to run migrations: %v", err)
@@ -91,6 +94,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
 	logrus.Info("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
