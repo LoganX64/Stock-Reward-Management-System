@@ -141,7 +141,7 @@ You can run Stocky API using Docker for easy setup and deployment.
 version: '3.8'
 services:
   db:
-    image: postgres:15
+    image: postgres:17
     environment:
       POSTGRES_USER: your_db_user
       POSTGRES_PASSWORD: your_db_password
