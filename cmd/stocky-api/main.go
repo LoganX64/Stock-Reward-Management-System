@@ -79,7 +79,7 @@ func main() {
 	// =======================
 	cache := jobs.NewPriceCache()
 	fetcher := &jobs.RandomPriceFetcher{}
-	priceService := jobs.NewPriceService(db, cache, fetcher)
+	priceService := jobs.NewPriceService(db, cache, fetcher, nil)
 
 	go priceService.Start(ctx)
 	// =======================
