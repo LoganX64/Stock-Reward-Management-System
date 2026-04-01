@@ -77,8 +77,11 @@ func main() {
 	// =======================
 	// 🚀 Start Background Job
 	// =======================
-	go jobs.StartPriceUpdater(ctx, db)
+	cache := jobs.NewPriceCache()
+	fetcher := &jobs.RandomPriceFetcher{}
+	priceService := jobs.NewPriceService(db, cache, fetcher)
 
+	go priceService.Start(ctx)
 	// =======================
 	// 🌐 HTTP Server
 	// =======================
@@ -129,7 +132,7 @@ func main() {
 // 📦 Migrations
 // =======================
 func runMigrations(dbURL, migrationPath string) error {
-	m, err := migrate.New("file://" + migrationPath, dbURL)
+	m, err := migrate.New("file://"+migrationPath, dbURL)
 	if err != nil {
 		return fmt.Errorf("failed to create migrate instance: %w", err)
 	}
