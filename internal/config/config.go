@@ -3,6 +3,8 @@ package config
 import (
 	"log"
 	"os"
+
+	"github.com/joho/godotenv"
 )
 
 type HTTPServer struct {
@@ -19,12 +21,22 @@ type Database struct {
 }
 
 type Config struct {
-	Env        string
-	Database   Database
-	HTTPServer HTTPServer
+	Env           string
+	Database      Database
+	HTTPServer    HTTPServer
+	MigrationPath string
 }
 
 func LoadFromEnv() *Config {
+	// Load .env file if it exists
+	envFile := os.Getenv("ENV_FILE")
+	if envFile == "" {
+		envFile = ".env.local"
+	}
+	if err := godotenv.Load(envFile); err != nil {
+		log.Printf("No %s file found, using system environment variables", envFile)
+	}
+
 	getEnv := func(key, defaultVal string) string {
 		if v, ok := os.LookupEnv(key); ok {
 			return v
@@ -44,8 +56,7 @@ func LoadFromEnv() *Config {
 		},
 		HTTPServer: HTTPServer{
 			Port: ":" + getEnv("HTTP_PORT", "8080"),
-		},
-	}
+		}, MigrationPath: getEnv("MIGRATION_PATH", "./internal/database/migrations")}
 
 	return cfg
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-
 	"github.com/sirupsen/logrus"
 
 	_ "github.com/lib/pq"
@@ -29,7 +27,6 @@ import (
 var db *sql.DB
 
 func main() {
-
 	cfg := config.MustLoad()
 
 	connStr := fmt.Sprintf(
@@ -52,8 +49,10 @@ func main() {
 		logrus.Fatalf("failed to ping db: %v", err)
 	}
 	logrus.Info("connected to Database successfully")
+
 	routes.InitDB(db)
 
+	// Run migrations
 	dbURL := fmt.Sprintf(
 		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
 		cfg.Database.User,
@@ -64,15 +63,27 @@ func main() {
 		cfg.Database.SSLMode,
 	)
 
-	if err := runMigrations(dbURL); err != nil {
+	if err := runMigrations(dbURL, cfg.MigrationPath); err != nil {
 		logrus.Fatalf("failed to run migrations: %v", err)
 	}
 	logrus.Info("Migrations done successfully")
 
+	// =======================
+	// 🧠 Root Context
+	// =======================
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// =======================
+	// 🚀 Start Background Job
+	// =======================
+	go jobs.StartPriceUpdater(ctx, db)
+
+	// =======================
+	// 🌐 HTTP Server
+	// =======================
 	r := gin.Default()
 	routes.Routes(r)
-
-	go jobs.StartPriceUpdater(db)
 
 	port := cfg.HTTPServer.Port
 	if port == "" {
@@ -91,30 +102,45 @@ func main() {
 		}
 	}()
 
+	// =======================
+	// 🛑 Graceful Shutdown
+	// =======================
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logrus.Info("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	// Stop background workers
+	cancel()
+
+	// Shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logrus.Fatal("Server forced to shutdown: ", err)
 	}
-	logrus.Info("Server exited")
 
+	logrus.Info("Server exited properly")
 }
-func runMigrations(dbURL string) error {
-	m, err := migrate.New("file://internal/database/migrations", dbURL)
+
+// =======================
+// 📦 Migrations
+// =======================
+func runMigrations(dbURL, migrationPath string) error {
+	m, err := migrate.New("file://" + migrationPath, dbURL)
 	if err != nil {
 		return fmt.Errorf("failed to create migrate instance: %w", err)
 	}
+
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
+
 	if err == migrate.ErrNoChange {
 		logrus.Info("No new migrations to apply")
 	}
+
 	return nil
 }

@@ -29,6 +29,7 @@
 - **Solution:**
   - `stock_prices` table caches the latest stock prices.
   - `stock_price_history` maintains historical prices for reference.
+  - Background Go worker automatically updates prices periodically.
   - APIs fetch from this database rather than live API.
   - If price is missing, API returns a `400` or appropriate error message.
 

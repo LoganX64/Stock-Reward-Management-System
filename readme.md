@@ -27,7 +27,7 @@ The system maintains a **double-entry ledger** to track stock units, INR outflow
 - Provide historical and portfolio statistics.
 - Standardized response handling across all endpoints.
 - Request ID tracking for better debugging and logging.
-- Robust price update system with caching and fallback mechanisms.
+- Background Go worker for automatic price updates with caching and fallback mechanisms.
 - Graceful handling of external API downtime.
 
 ---
@@ -72,32 +72,68 @@ The project uses PostgreSQL with the following tables:
 
 ### Prerequisites
 
-- Docker & Docker Compose installed
+- **For Local Development:**
+  - Go (version 1.25 or later) installed
+  - PostgreSQL installed and running locally
+  - Create a database named `assignment` (or update in `.env.local`)
 
-### Using Docker
+- **For Docker:**
+  - Docker & Docker Compose installed
 
-1. Build and start the services using Docker Compose:
+### Running Locally
 
-```bash
-  docker-compose up -d --build
-```
+1. **Set up PostgreSQL:**
+   - Ensure PostgreSQL is running with user `postgres`, password `9908` (or update `.env.local`).
+   - Create database: `assignment`.
 
-### Setup Steps:
-
-1. Clone the repository:
+2. **Clone and Run:**
 
    ```bash
    git clone <repository-url>
    cd stocky-api
+   go run ./cmd/stocky-api/main.go
    ```
 
-2. The API will be available at:
+3. **Access the API:**
+   - API available at: `http://localhost:8080`
+   - Background price updater (Go worker) runs automatically to fetch and update stock prices.
 
-   `http://localhost:8080`
+### Using Docker
 
-### Environment Variables (inside Docker)
+1. **Build and Start Services:**
 
-The application reads the following environment variables for configuration:
+   ```bash
+   docker-compose up --build
+   ```
+
+   - For detached mode: `docker-compose up --build -d`
+
+2. **Access the API:**
+   - API available at: `http://localhost:8080`
+   - Database: PostgreSQL on port 5432
+   - Background price updater runs inside the container.
+
+### Environment Variables
+
+- **Local (`.env.local`):**
+  - `DB_HOST=localhost`
+  - `POSTGRES_USER=postgres`
+  - `POSTGRES_PASSWORD=9908`
+  - `POSTGRES_DB=assignment`
+  - `DB_PORT=5432`
+  - `HTTP_PORT=8080`
+  - `MIGRATION_PATH=./internal/database/migrations`
+
+- **Docker (`.env.docker`):**
+  - `DB_HOST=db`
+  - `POSTGRES_USER=stocky_user`
+  - `POSTGRES_PASSWORD=stocky_pass`
+  - `POSTGRES_DB=stocky`
+  - `DB_PORT=5432`
+  - `HTTP_PORT=8080`
+  - `MIGRATION_PATH=/app/internal/database/migrations`
+
+The application automatically loads the appropriate `.env` file based on the `ENV_FILE` environment variable.
 
 - `DB_HOST` — Database host (PostgreSQL service)
 - `DB_PORT` — Database port (default: 5432)
@@ -123,7 +159,7 @@ The application reads the following environment variables for configuration:
 - `/internal/utils/response/` — Standardized HTTP response utilities.
   - `response.go` — Response formatting functions (WriteJson, ErrorResponse, etc.).
 - `/internal/utils/` — Utility functions (rounding, JSON helpers).
-- `/internal/jobs/` — Background jobs (price updater).
+- `/internal/jobs/` — Background jobs (price updater worker).
 - `/internal/database/migrations/` — SQL migrations for tables and schema.
 - `Dockerfile` — Docker image instructions
 - `docker-compose.yml` — Docker Compose setup
@@ -131,50 +167,21 @@ The application reads the following environment variables for configuration:
 
 ---
 
-## Docker Support
-
-You can run Stocky API using Docker for easy setup and deployment.
-
-# Docker Compose File Example
-
-```
-version: '3.8'
-services:
-  db:
-    image: postgres:17
-    environment:
-      POSTGRES_USER: your_db_user
-      POSTGRES_PASSWORD: your_db_password
-      POSTGRES_DB: assignment
-    ports:
-      - "5432:5432"
-    volumes:
-      - db-data:/var/lib/postgresql/data
-
-  api:
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_USER: your_db_user
-      DB_PASSWORD: your_db_password
-      DB_NAME: assignment
-      PORT: 8080
     depends_on:
       - db
 
 volumes:
-  db-data:
+db-data:
 
 ```
 
 # Start services:
 
 ```
+
 docker-compose up -d
-```
+
+````
 
 ## Response Format
 
@@ -186,7 +193,7 @@ The API uses a standardized response package for consistent error and success re
   {
     "error": "error message here"
   }
-  ```
+````
 
 ### Response Package Functions:
 
