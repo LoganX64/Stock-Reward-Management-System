@@ -11,7 +11,6 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
@@ -26,7 +25,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Invalid request payload"))
 		return
 	}
-
+	// Basic validation
 	if req.Quantity == 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity cannot be zero"))
 		return
@@ -47,13 +46,15 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	rolledBack := false
+	// Safe rollback on error or panic
 	defer func() {
-		if !rolledBack {
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
+			panic(p)
 		}
+		_ = tx.Rollback()
 	}()
-
+	// Check user exists
 	var userExists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`,
 		req.UserID).Scan(&userExists); err != nil {
@@ -65,7 +66,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("User does not exist"))
 		return
 	}
-
+	// Fetch current price
 	var currentPrice float64
 	if err := tx.QueryRowContext(ctx, `SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
 		if err == sql.ErrNoRows {
@@ -77,21 +78,21 @@ func CreateReward(c *gin.Context) {
 		return
 	}
 
-	idempotencyKey := uuid.New().String()
-
+	// Insert reward
 	var reward models.Reward
 	err = tx.QueryRowContext(ctx, `
-    INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
-    VALUES ($1, $2, $3, $4, NOW())
-    RETURNING id, user_id, stock_symbol, quantity, idempotency_key, created_at`,
+		INSERT INTO rewards (user_id, stock_symbol, quantity, created_at)
+		VALUES ($1, $2, $3, NOW())
+		RETURNING id, user_id, stock_symbol, quantity, created_at`,
 		req.UserID,
 		req.StockSymbol,
 		req.Quantity,
-		idempotencyKey).Scan(
-		&reward.ID, &reward.User_ID,
+	).Scan(
+		&reward.ID,
+		&reward.User_ID,
 		&reward.Stock_Symbol,
 		&reward.Quantity,
-		&reward.IdempotencyKey, &reward.CreatedAt,
+		&reward.CreatedAt,
 	)
 
 	if err != nil {
@@ -103,7 +104,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
+	// Calculate financials
 	amount := utils.RoundAmount(currentPrice * req.Quantity)
 	isReversal := req.Quantity < 0
 
@@ -117,6 +118,8 @@ func CreateReward(c *gin.Context) {
 	}
 
 	totalFees := utils.RoundAmount(brokerage + stt + gst)
+
+	// Prepare ledger entries
 
 	ledgerEntries := []models.Ledger{
 		{
@@ -150,7 +153,7 @@ func CreateReward(c *gin.Context) {
 				Amount:     -gst},
 		)
 	}
-
+	// Insert all ledger entries
 	for _, entry := range ledgerEntries {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO ledger (reward_id, entry_type, stock_symbol, quantity, amount, created_at)
@@ -166,19 +169,17 @@ func CreateReward(c *gin.Context) {
 			return
 		}
 	}
-
+	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		logger.WithError(err).Error("Failed to commit transaction")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	rolledBack = true
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"message":         "Reward created successfully",
-		"rewardId":        reward.ID,
-		"idempotency_key": idempotencyKey,
-		"amount_inr":      amount,
+		"message":    "Reward created successfully",
+		"rewardId":   reward.ID,
+		"amount_inr": amount,
 		"fees": map[string]interface{}{
 			"brokerage": brokerage,
 			"stt":       stt,

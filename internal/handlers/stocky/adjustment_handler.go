@@ -33,7 +33,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Invalid request payload"))
 		return
 	}
-
+	// Validate adjustment type
 	validTypes := map[string]bool{
 		models.Reward_Reversal:   true,
 		models.Fee_Refund:        true,
@@ -56,17 +56,22 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	rolledBack := false
+	// safe rollback in case of panic or early return
 	defer func() {
-		if !rolledBack {
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
+			panic(p)
 		}
+		_ = tx.Rollback()
 	}()
-
+	// Fetch quantity AND stock_symbol in a SINGLE query
 	var currentQty float64
+	var stockSymbol string
 	err = tx.QueryRowContext(ctx, `
-		SELECT quantity FROM rewards WHERE id=$1
-	`, rewardID).Scan(&currentQty)
+		SELECT quantity, stock_symbol 
+		FROM rewards 
+		WHERE id = $1
+	`, rewardID).Scan(&currentQty, &stockSymbol)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward not found"))
@@ -76,7 +81,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
+	// Check total adjustments so far
 	var totalDeltaQty float64
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(delta_quantity),0) FROM adjustments WHERE reward_id=$1
@@ -86,12 +91,12 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
+	// Prevent negative quantity
 	if currentQty+totalDeltaQty+req.DeltaQuantity < 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
-
+	// Insert adjustment
 	var inserted models.Adjustment
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, created_at)
@@ -116,15 +121,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
-	var stockSymbol string
-	err = tx.QueryRowContext(ctx, `SELECT stock_symbol FROM rewards WHERE id=$1`, rewardID).Scan(&stockSymbol)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch reward stock symbol")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
+	// Build ledger entries based on adjustment type
 	ledgerEntries := []models.Ledger{}
 
 	switch req.AdjustmentType {
@@ -171,7 +168,7 @@ func adjustmentHandler(c *gin.Context) {
 			})
 		}
 	}
-
+	// Insert ledger entries
 	for _, entry := range ledgerEntries {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO ledger (reward_id, entry_type, stock_symbol, quantity, amount, created_at)
@@ -187,13 +184,12 @@ func adjustmentHandler(c *gin.Context) {
 			return
 		}
 	}
-
+	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		logger.WithError(err).Error("Failed to commit transaction")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	rolledBack = true
 
 	logger.WithFields(logrus.Fields{
 		"adjustment_id": inserted.ID,
