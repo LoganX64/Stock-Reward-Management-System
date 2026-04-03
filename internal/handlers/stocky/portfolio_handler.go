@@ -20,6 +20,7 @@ func PortfolioHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
+	// Query from the view
 	rows, err := db.Query(`
 		SELECT stock_symbol, adjusted_quantity, current_price, inr_value
 		FROM user_portfolio
@@ -52,6 +53,7 @@ func PortfolioHandler(c *gin.Context) {
 			return
 		}
 
+		// Apply rounding
 		item.Quantity = utils.RoundQuantity(item.Quantity)
 		item.CurrentPrice = utils.RoundAmount(item.CurrentPrice)
 		item.INRValue = utils.RoundAmount(item.INRValue)

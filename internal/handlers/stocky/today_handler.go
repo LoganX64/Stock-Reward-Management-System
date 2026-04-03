@@ -56,6 +56,7 @@ func GetTodayStocks(c *gin.Context) {
 			return
 		}
 
+		// Apply consistent rounding
 		s.AdjustedQuantity = utils.RoundQuantity(s.AdjustedQuantity)
 		s.CurrentPrice = utils.RoundAmount(s.CurrentPrice)
 		s.TotalAdjustmentAmount = utils.RoundAmount(s.TotalAdjustmentAmount)

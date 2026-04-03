@@ -20,23 +20,23 @@ func StatsHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	rowsToday, err := db.Query(`
+	rows, err := db.Query(`
 		SELECT stock_symbol, adjusted_quantity
 		FROM today_rewards
 		WHERE user_id = $1
 	`, userID)
 	if err != nil {
-		logger.WithError(err).Error("today rewards query")
+		logger.WithError(err).Error("Failed to fetch today rewards")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal error"))
 		return
 	}
-	defer rowsToday.Close()
+	defer rows.Close()
 
 	var todayRewards []models.TodayReward
-	for rowsToday.Next() {
+	for rows.Next() {
 		var tr models.TodayReward
-		if err := rowsToday.Scan(&tr.StockSymbol, &tr.TotalQuantity); err != nil {
-			logger.WithError(err).Error("today scan")
+		if err := rows.Scan(&tr.StockSymbol, &tr.TotalQuantity); err != nil {
+			logger.WithError(err).Error("Failed to scan today reward")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal error"))
 			return
 		}
@@ -46,19 +46,19 @@ func StatsHandler(c *gin.Context) {
 
 	var totalPortfolioValue float64
 	err = db.QueryRow(`
-		SELECT COALESCE(SUM(inr_value),0)
+		SELECT COALESCE(SUM(inr_value), 0)
 		FROM user_portfolio
 		WHERE user_id = $1
 	`, userID).Scan(&totalPortfolioValue)
 	if err != nil {
-		logger.WithError(err).Error("portfolio value query")
+		logger.WithError(err).Error("Failed to fetch total portfolio value")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal error"))
 		return
 	}
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":              userID,
-		"todayRewards":        todayRewards,
+		"todayRewards":        utils.OrEmpty(todayRewards),
 		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
 	})
 }
