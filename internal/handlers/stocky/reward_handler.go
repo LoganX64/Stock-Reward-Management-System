@@ -25,6 +25,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Invalid request payload"))
 		return
 	}
+
 	// Basic validation
 	if req.Quantity == 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity cannot be zero"))
@@ -46,14 +47,15 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+
 	// Safe rollback on error or panic
 	defer func() {
 		if p := recover(); p != nil {
 			_ = tx.Rollback()
 			panic(p)
 		}
-		_ = tx.Rollback()
 	}()
+
 	// Check user exists
 	var userExists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`,
@@ -66,6 +68,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("User does not exist"))
 		return
 	}
+
 	// Fetch current price
 	var currentPrice float64
 	if err := tx.QueryRowContext(ctx, `SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
@@ -104,6 +107,7 @@ func CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+
 	// Calculate financials
 	amount := utils.RoundAmount(currentPrice * req.Quantity)
 	isReversal := req.Quantity < 0
@@ -120,7 +124,6 @@ func CreateReward(c *gin.Context) {
 	totalFees := utils.RoundAmount(brokerage + stt + gst)
 
 	// Prepare ledger entries
-
 	ledgerEntries := []models.Ledger{
 		{
 			Reward_ID:    reward.ID,
@@ -153,6 +156,7 @@ func CreateReward(c *gin.Context) {
 				Amount:     -gst},
 		)
 	}
+
 	// Insert all ledger entries
 	for _, entry := range ledgerEntries {
 		if _, err := tx.ExecContext(ctx, `
@@ -169,6 +173,7 @@ func CreateReward(c *gin.Context) {
 			return
 		}
 	}
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		logger.WithError(err).Error("Failed to commit transaction")

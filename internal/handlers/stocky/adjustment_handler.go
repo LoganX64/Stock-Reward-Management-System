@@ -33,6 +33,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Invalid request payload"))
 		return
 	}
+
 	// Validate adjustment type
 	validTypes := map[string]bool{
 		models.Reward_Reversal:   true,
@@ -56,14 +57,15 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	// safe rollback in case of panic or early return
+
+	// safe rollback in case of panic
 	defer func() {
 		if p := recover(); p != nil {
 			_ = tx.Rollback()
 			panic(p)
 		}
-		_ = tx.Rollback()
 	}()
+
 	// Fetch quantity AND stock_symbol in a SINGLE query
 	var currentQty float64
 	var stockSymbol string
@@ -81,6 +83,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+
 	// Check total adjustments so far
 	var totalDeltaQty float64
 	err = tx.QueryRowContext(ctx, `
@@ -91,11 +94,13 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+
 	// Prevent negative quantity
 	if currentQty+totalDeltaQty+req.DeltaQuantity < 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
+
 	// Insert adjustment
 	var inserted models.Adjustment
 	err = tx.QueryRowContext(ctx, `
@@ -121,6 +126,7 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+
 	// Build ledger entries based on adjustment type
 	ledgerEntries := []models.Ledger{}
 
@@ -131,7 +137,7 @@ func adjustmentHandler(c *gin.Context) {
 				Reward_ID:    rewardID,
 				Entry_Type:   models.StockUnits,
 				Stock_Symbol: stockSymbol,
-				Quantity:     -req.DeltaQuantity,
+				Quantity:     -req.DeltaQuantity, // remove shares
 				Amount:       0,
 			})
 		}
@@ -139,7 +145,7 @@ func adjustmentHandler(c *gin.Context) {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
-				Amount:     -req.DeltaAmount,
+				Amount:     -req.DeltaAmount, // usually money coming back
 			})
 		}
 	case models.Fee_Refund:
@@ -147,7 +153,7 @@ func adjustmentHandler(c *gin.Context) {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
-				Amount:     req.DeltaAmount,
+				Amount:     req.DeltaAmount, // money refunded
 			})
 		}
 	case models.Manual_Correction:
@@ -164,10 +170,11 @@ func adjustmentHandler(c *gin.Context) {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
-				Amount:     req.DeltaAmount,
+				Amount:     req.DeltaAmount, // cash correction
 			})
 		}
 	}
+
 	// Insert ledger entries
 	for _, entry := range ledgerEntries {
 		if _, err := tx.ExecContext(ctx, `
@@ -179,11 +186,13 @@ func adjustmentHandler(c *gin.Context) {
 			entry.Stock_Symbol,
 			utils.RoundQuantity(entry.Quantity),
 			utils.RoundAmount(entry.Amount)); err != nil {
+			_ = tx.Rollback()
 			logger.WithError(err).Error("Failed to insert ledger entry")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("failed to update ledger"))
 			return
 		}
 	}
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		logger.WithError(err).Error("Failed to commit transaction")
@@ -193,11 +202,14 @@ func adjustmentHandler(c *gin.Context) {
 
 	logger.WithFields(logrus.Fields{
 		"adjustment_id": inserted.ID,
+		"delta_qty":     req.DeltaQuantity,
+		"delta_amount":  req.DeltaAmount,
 	}).Info("Adjustment applied successfully")
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"message":  "Adjustment applied successfully",
-		"rewardId": rewardID,
-		"data":     inserted,
+		"message":     "Adjustment applied successfully",
+		"rewardId":    rewardID,
+		"stockSymbol": stockSymbol,
+		"data":        inserted,
 	})
 }
