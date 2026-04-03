@@ -14,11 +14,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//
 // =======================
-// Interfaces
+// Interfaces (unchanged)
 // =======================
-//
 
 type DB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -34,11 +32,9 @@ type PriceFetcher interface {
 	GetLatestPrice(symbol string, lastPrice float64) (float64, error)
 }
 
-//
 // =======================
-// PriceCache
+// PriceCache (unchanged)
 // =======================
-//
 
 type PriceCache struct {
 	mu     sync.RWMutex
@@ -67,11 +63,9 @@ func (pc *PriceCache) GetPrice(symbol string) (float64, time.Time, bool) {
 	return val.Price, val.UpdatedAt, ok
 }
 
-//
 // =======================
-// RandomPriceFetcher
+// RandomPriceFetcher (unchanged)
 // =======================
-//
 
 type RandomPriceFetcher struct {
 	FallbackFactor float64
@@ -97,22 +91,16 @@ func (r *RandomPriceFetcher) GetLatestPrice(symbol string, lastPrice float64) (f
 	return utils.RoundAmount(lastPrice * (0.95 + rand.Float64()*0.10)), nil
 }
 
-//
 // =======================
-// Options
+// Options & PriceService (unchanged structure)
 // =======================
-//
 
 type PriceServiceOptions struct {
-	MaxStale time.Duration
-
-	Workers int
-
+	MaxStale        time.Duration
+	Workers         int
 	DBMaxConcurrent int
-
-	TickInterval time.Duration
-
-	Now func() time.Time
+	TickInterval    time.Duration
+	Now             func() time.Time
 }
 
 func defaultOptions() PriceServiceOptions {
@@ -152,12 +140,6 @@ func resolveOptions(in *PriceServiceOptions) PriceServiceOptions {
 	return o
 }
 
-//
-// =======================
-// PriceService
-// =======================
-//
-
 type PriceService struct {
 	db      DB
 	cache   Cache
@@ -181,11 +163,9 @@ func NewPriceService(db DB, cache Cache, fetcher PriceFetcher, opts *PriceServic
 	}
 }
 
-//
 // =======================
-// Scheduler
+// Scheduler (unchanged)
 // =======================
-//
 
 func (s *PriceService) Start(ctx context.Context) {
 	if !atomic.CompareAndSwapInt32(&s.started, 0, 1) {
@@ -237,11 +217,9 @@ func (s *PriceService) triggerUpdate(ctx context.Context) {
 	}()
 }
 
-//
 // =======================
-// Cache initialisation
+// Cache initialization (unchanged)
 // =======================
-//
 
 func (s *PriceService) initializeCache(ctx context.Context) {
 	entries, err := s.querySymbolPrices(ctx)
@@ -255,11 +233,9 @@ func (s *PriceService) initializeCache(ctx context.Context) {
 	logrus.Infof("Cache seeded with %d symbols", len(entries))
 }
 
-//
 // =======================
-// Worker pipeline
+// Worker pipeline (unchanged)
 // =======================
-//
 
 type PriceJob struct {
 	Symbol    string
@@ -327,24 +303,33 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 	}
 }
 
-//
 // =======================
-// Core logic
+// Core logic with improved logging
 // =======================
-//
 
 func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 	log := logrus.WithField("symbol", job.Symbol)
 
 	newPrice, fetchErr := s.fetcher.GetLatestPrice(job.Symbol, job.OldPrice)
+
+	// Log price fetch result
 	if fetchErr != nil {
-		log.WithError(fetchErr).Warn("Price fetch degraded; proceeding with fetcher fallback price")
+		log.WithError(fetchErr).
+			WithField("old_price", job.OldPrice).
+			WithField("new_price", newPrice).
+			Warn("Price fetch failed - using fallback price")
+	} else {
+		log.WithField("old_price", job.OldPrice).
+			WithField("new_price", newPrice).
+			Info("Price fetched successfully")
 	}
 
 	if newPrice == job.OldPrice {
+		log.WithField("price", newPrice).Debug("Price unchanged, skipping update")
 		return
 	}
 
+	// Acquire DB semaphore
 	select {
 	case s.dbSem <- struct{}{}:
 		defer func() { <-s.dbSem }()
@@ -352,23 +337,31 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 		return
 	}
 
+	// Update database
 	if err := s.updatePrice(ctx, job.Symbol, newPrice); err != nil {
 		log.WithError(err).Error("DB price update failed -- cache not updated")
 		return
 	}
 
+	// Update cache
 	s.cache.SetPrice(job.Symbol, newPrice, s.opts.Now())
 
+	// Log successful update with clear before/after
+	log.WithFields(logrus.Fields{
+		"old_price": job.OldPrice,
+		"new_price": newPrice,
+		"change":    utils.RoundAmount(newPrice - job.OldPrice),
+	}).Info("Price updated successfully")
+
+	// Insert history
 	if err := s.insertHistory(ctx, job.Symbol, newPrice); err != nil {
 		log.WithError(err).Error("History insert failed")
 	}
 }
 
-//
 // =======================
-// DB helpers
+// DB helpers (unchanged)
 // =======================
-//
 
 func (s *PriceService) querySymbolPrices(ctx context.Context) ([]PriceJob, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -407,11 +400,9 @@ func (s *PriceService) updatePrice(ctx context.Context, symbol string, price flo
 		logrus.WithField("symbol", symbol).
 			WithField("attempt", attempt+1).
 			WithError(lastErr).Warn("updatePrice retry")
-
 		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
 		select {
 		case <-timer.C:
-
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
