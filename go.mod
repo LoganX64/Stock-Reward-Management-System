@@ -2,10 +2,7 @@ module github.com/LoganX64/stocky-api
 
 go 1.25.1
 
-require (
-	github.com/google/uuid v1.6.0
-	github.com/sirupsen/logrus v1.9.3
-)
+require github.com/sirupsen/logrus v1.9.3
 
 require (
 	github.com/bytedance/sonic v1.14.0 // indirect

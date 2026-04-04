@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -15,10 +14,8 @@ import (
 )
 
 func (h *Handler) adjustmentHandler(c *gin.Context) {
-	idParam := c.Param("id")
-	rewardID, err := strconv.Atoi(idParam)
-	if err != nil {
-		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("invalid reward ID"))
+	rewardID, ok := parseRewardID(c)
+	if !ok {
 		return
 	}
 

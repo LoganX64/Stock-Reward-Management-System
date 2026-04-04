@@ -66,16 +66,16 @@ func parseUserID(c *gin.Context) (int, bool) {
 }
 
 // parseRewardID extracts and validates reward ID
-// func parseRewardID(c *gin.Context) (int, bool) {
-// 	idStr := c.Param("id")
-// 	id, err := strconv.Atoi(idStr)
-// 	if err != nil || id <= 0 {
-// 		response.WriteJson(c.Writer, http.StatusBadRequest,
-// 			response.ErrorResponse("invalid reward ID – must be a positive integer"))
-// 		return 0, false
-// 	}
-// 	return id, true
-// }
+func parseRewardID(c *gin.Context) (int, bool) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		response.WriteJson(c.Writer, http.StatusBadRequest,
+			response.ErrorResponse("invalid reward ID – must be a positive integer"))
+		return 0, false
+	}
+	return id, true
+}
 
 // Routes now accepts the handler (no global db anymore)
 func Routes(r *gin.Engine, handler *Handler) {
