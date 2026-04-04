@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func PortfolioHandler(c *gin.Context) {
+func (h *Handler) PortfolioHandler(c *gin.Context) {
 	userID, ok := parseUserID(c)
 	if !ok {
 		return
@@ -21,7 +21,7 @@ func PortfolioHandler(c *gin.Context) {
 	})
 
 	// Query from the view
-	rows, err := db.Query(`
+	rows, err := h.DB.Query(`
 		SELECT stock_symbol, adjusted_quantity, current_price, inr_value
 		FROM user_portfolio
 		WHERE user_id = $1

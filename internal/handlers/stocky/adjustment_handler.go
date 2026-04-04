@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func adjustmentHandler(c *gin.Context) {
+func (h *Handler) adjustmentHandler(c *gin.Context) {
 	idParam := c.Param("id")
 	rewardID, err := strconv.Atoi(idParam)
 	if err != nil {
@@ -51,7 +51,7 @@ func adjustmentHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	tx, err := h.DB.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		logger.WithError(err).Error("Failed to begin transaction")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
@@ -83,20 +83,9 @@ func adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
-	// Check total adjustments so far
-	var totalDeltaQty float64
-	err = tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(delta_quantity),0) FROM adjustments WHERE reward_id=$1
-	`, rewardID).Scan(&totalDeltaQty)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch adjustment sum")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
 	// Prevent negative quantity
-	if currentQty+totalDeltaQty+req.DeltaQuantity < 0 {
+	if currentQty+req.DeltaQuantity < 0 {
+		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
@@ -123,6 +112,20 @@ func adjustmentHandler(c *gin.Context) {
 	)
 	if err != nil {
 		logger.WithError(err).Error("Failed to insert adjustment")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
+	// Update the main reward's quantity
+	_, err = tx.ExecContext(ctx, `
+    UPDATE rewards 
+    SET quantity = quantity + $1 
+    WHERE id = $2
+`, req.DeltaQuantity, rewardID)
+
+	if err != nil {
+		_ = tx.Rollback()
+		logger.WithError(err).Error("Failed to update reward quantity")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}

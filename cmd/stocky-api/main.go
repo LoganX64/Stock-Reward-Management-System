@@ -21,6 +21,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 
 	"github.com/LoganX64/stocky-api/internal/config"
+	"github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	routes "github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	"github.com/LoganX64/stocky-api/internal/jobs"
 )
@@ -41,8 +42,6 @@ func main() {
 			logrus.WithError(err).Error("Failed to close DB cleanly")
 		}
 	}()
-
-	routes.InitDB(db)
 
 	// =======================
 	// Migrations
@@ -84,7 +83,9 @@ func main() {
 	// HTTP Server
 	// =======================
 	r := gin.Default()
-	routes.Routes(r)
+	handler := stocky.NewHandler(db)
+	// Register routes with the handler
+	routes.Routes(r, handler)
 
 	port := cfg.HTTPServer.Port
 	if port == "" {

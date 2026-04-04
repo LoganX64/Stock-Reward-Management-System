@@ -2,35 +2,25 @@ package stocky
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
-
 	"net/http"
 	"strconv"
 
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
-
 	"github.com/sirupsen/logrus"
 )
 
-var db *sql.DB
-
-// InitDB initializes the global database connection.
-func InitDB(database *sql.DB) {
-	db = database
-}
-
 // generateRequestID creates a short, collision-resistant request ID
 func generateRequestID() string {
-	b := make([]byte, 8) // 16 hex characters
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return "unknown"
 	}
 	return hex.EncodeToString(b)
 }
 
-// RequestIDLogger middleware adds a unique request_id to context and logger
+// RequestIDLogger middleware
 func RequestIDLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		reqID := generateRequestID()
@@ -43,7 +33,7 @@ func RequestIDLogger() gin.HandlerFunc {
 	}
 }
 
-// requestID returns the request ID from context (safe fallback)
+// requestID returns the request ID from context
 func requestID(c *gin.Context) string {
 	if id, exists := c.Get("request_id"); exists {
 		if str, ok := id.(string); ok {
@@ -53,7 +43,7 @@ func requestID(c *gin.Context) string {
 	return "unknown"
 }
 
-// getLogger returns a logger with request_id already attached (recommended)
+// getLogger returns a logger with request_id already attached
 func getLogger(c *gin.Context) *logrus.Entry {
 	if logger, exists := c.Get("logger"); exists {
 		if entry, ok := logger.(*logrus.Entry); ok {
@@ -63,7 +53,7 @@ func getLogger(c *gin.Context) *logrus.Entry {
 	return logrus.WithField("request_id", requestID(c))
 }
 
-// parseUserID extracts and validates userId from URL param
+// parseUserID extracts and validates userId
 func parseUserID(c *gin.Context) (int, bool) {
 	idStr := c.Param("userId")
 	id, err := strconv.Atoi(idStr)
@@ -75,7 +65,7 @@ func parseUserID(c *gin.Context) (int, bool) {
 	return id, true
 }
 
-// parseRewardID extracts and validates reward ID (used in adjustment route)
+// parseRewardID extracts and validates reward ID
 func parseRewardID(c *gin.Context) (int, bool) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
@@ -87,29 +77,27 @@ func parseRewardID(c *gin.Context) (int, bool) {
 	return id, true
 }
 
-func Routes(r *gin.Engine) {
-	// Global middleware
+// Routes now accepts the handler (no global db anymore)
+func Routes(r *gin.Engine, handler *Handler) {
 	r.Use(RequestIDLogger())
 
-	// Health Check Endpoint
+	// Health check
 	r.GET("/health", func(c *gin.Context) {
-		logrus.WithField("request_id", requestID(c)).Info("Health check endpoint hit")
+		getLogger(c).Info("Health check endpoint hit")
 		response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 			"status": "OK",
 		})
 	})
 
-	// API v1 routes group
+	// API v1 group
 	v1 := r.Group("/api/v1")
 	{
-		v1.POST("/reward", CreateReward)
-		// User-specific routes
-		v1.GET("/today-stocks/:userId", GetTodayStocks)
-		v1.GET("/historical-inr/:userId", GetHistoricalINR)
-		v1.GET("/stats/:userId", StatsHandler)
-		v1.GET("/portfolio/:userId", PortfolioHandler)
-		// Adjustment route
-		v1.POST("/adjustments/:id", adjustmentHandler)
-	}
+		v1.POST("/reward", handler.CreateReward)
+		v1.POST("/adjustments/:id", handler.adjustmentHandler)
 
+		v1.GET("/today-stocks/:userId", handler.GetTodayStocks)
+		v1.GET("/historical-inr/:userId", handler.GetHistoricalINR)
+		v1.GET("/stats/:userId", handler.StatsHandler)
+		v1.GET("/portfolio/:userId", handler.PortfolioHandler)
+	}
 }

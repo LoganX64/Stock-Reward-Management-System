@@ -3,6 +3,7 @@ package stocky
 import (
 	"context"
 	"database/sql"
+	"math"
 
 	"net/http"
 	"time"
@@ -15,7 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func CreateReward(c *gin.Context) {
+func (h *Handler) CreateReward(c *gin.Context) {
 	logger := logrus.WithField("request_id", requestID(c))
 
 	var req models.CreateRewardRequest
@@ -41,7 +42,7 @@ func CreateReward(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	tx, err := h.DB.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		logger.WithError(err).Error("Failed to begin transaction")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
@@ -61,10 +62,12 @@ func CreateReward(c *gin.Context) {
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`,
 		req.UserID).Scan(&userExists); err != nil {
 		logger.WithError(err).Error("User existence check failed")
+		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
 	if !userExists {
+		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("User does not exist"))
 		return
 	}
@@ -72,6 +75,7 @@ func CreateReward(c *gin.Context) {
 	// Fetch current price
 	var currentPrice float64
 	if err := tx.QueryRowContext(ctx, `SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
+		_ = tx.Rollback()
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Stock symbol not found"))
 			return
@@ -99,6 +103,7 @@ func CreateReward(c *gin.Context) {
 	)
 
 	if err != nil {
+		_ = tx.Rollback()
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
 			return
@@ -109,15 +114,22 @@ func CreateReward(c *gin.Context) {
 	}
 
 	// Calculate financials
-	amount := utils.RoundAmount(currentPrice * req.Quantity)
+	absQty := math.Abs(req.Quantity)
+	shareValue := utils.RoundAmount(currentPrice * absQty)
 	isReversal := req.Quantity < 0
+
+	// Cash flow: negative = outflow (normal reward), positive = inflow (reversal)
+	cashFlow := -shareValue
+	if isReversal {
+		cashFlow = shareValue
+	}
 
 	brokerage := 0.0
 	stt := 0.0
 	gst := 0.0
 	if !isReversal {
-		brokerage = utils.RoundAmount(amount * 0.005)
-		stt = utils.RoundAmount(amount * 0.001)
+		brokerage = utils.RoundAmount(shareValue * 0.005)
+		stt = utils.RoundAmount(shareValue * 0.001)
 		gst = utils.RoundAmount((brokerage + stt) * 0.18)
 	}
 
@@ -137,7 +149,7 @@ func CreateReward(c *gin.Context) {
 			Entry_Type:   models.INROutflow,
 			Stock_Symbol: "",
 			Quantity:     0,
-			Amount:       -amount,
+			Amount:       cashFlow,
 		},
 	}
 	if !isReversal {
@@ -168,6 +180,7 @@ func CreateReward(c *gin.Context) {
 			entry.Stock_Symbol,
 			utils.RoundQuantity(entry.Quantity),
 			utils.RoundAmount(entry.Amount)); err != nil {
+			_ = tx.Rollback()
 			logger.WithError(err).Error("Failed to insert ledger entry")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
@@ -184,7 +197,7 @@ func CreateReward(c *gin.Context) {
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"message":    "Reward created successfully",
 		"rewardId":   reward.ID,
-		"amount_inr": amount,
+		"amount_inr": shareValue,
 		"fees": map[string]interface{}{
 			"brokerage": brokerage,
 			"stt":       stt,

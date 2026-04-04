@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func GetTodayStocks(c *gin.Context) {
+func (h *Handler) GetTodayStocks(c *gin.Context) {
 	userID, ok := parseUserID(c)
 	if !ok {
 		return
@@ -20,7 +20,7 @@ func GetTodayStocks(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	rows, err := db.Query(`
+	rows, err := h.DB.Query(`
 		SELECT 
 			reward_event_id,
 			stock_symbol,
@@ -63,6 +63,11 @@ func GetTodayStocks(c *gin.Context) {
 		s.INRValue = utils.RoundAmount(s.INRValue)
 
 		stocks = append(stocks, s)
+	}
+	if err := rows.Err(); err != nil {
+		logger.WithError(err).Error("Error iterating today stocks rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
 	}
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
