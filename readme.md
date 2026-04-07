@@ -141,6 +141,32 @@ The application automatically loads the appropriate `.env` file based on the `EN
 - `DB_PASSWORD` — PostgreSQL password
 - `DB_NAME` — Database name -`PORT` — API port (default: 8080)
 
+---
+
+## Testing
+
+The project includes unit tests for the API handlers to ensure correctness of reward processing, adjustments, and portfolio calculations.
+
+### Test Files
+
+The test files are located in the `internal/handlers/stocky/` directory:
+- `adjustment_test.go` — Tests for manual corrections and reversals.
+- `historical_test.go` — Tests for historical INR valuation.
+- `portfolio_test.go` — Tests for portfolio aggregation.
+- `reward_test.go` — Tests for reward creation and fee calculation.
+- `stats_test.go` — Tests for overall statistics.
+- `todays_test.go` — Tests for today's stock rewards.
+
+### Running Tests
+
+To run all tests in the stocky handler package, use the following command:
+
+```bash
+go test -v github.com/LoganX64/stocky-api/internal/handlers/stocky
+```
+
+---
+
 ## Code Structure
 
 - `/cmd/stocky-api/main.go` — Entry point of the application.
