@@ -175,11 +175,17 @@ go test -v github.com/LoganX64/stocky-api/internal/handlers/stocky
 - `/internal/handlers/stocky/` — API route definitions and handlers.
   - `routes.go` — Route configuration and middleware.
   - `reward_handler.go` — Reward creation endpoints.
+  - `reward_test.go` — Tests for reward creation and fee calculation.
   - `adjustment_handler.go` — Adjustment/reversal endpoints.
+  - `adjustment_test.go` — Tests for manual corrections and reversals.
   - `portfolio_handler.go` — Portfolio retrieval endpoints.
+  - `portfolio_test.go` — Tests for portfolio aggregation.
   - `today_handler.go` — Today's stocks endpoints.
+  - `todays_test.go` — Tests for today's stock rewards.
   - `historical_handler.go` — Historical data endpoints.
+  - `historical_test.go` — Tests for historical INR valuation.
   - `stats_handler.go` — Statistics endpoints.
+  - `stats_test.go` — Tests for overall statistics.
 - `/internal/storage/models/` — Database models and data structures.
 - `/internal/config/` — Configuration management.
 - `/internal/utils/response/` — Standardized HTTP response utilities.
