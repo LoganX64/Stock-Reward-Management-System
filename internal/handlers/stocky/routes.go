@@ -77,7 +77,7 @@ func parseRewardID(c *gin.Context) (int, bool) {
 	return id, true
 }
 
-// Routes now accepts the handler (no global db anymore)
+// Routes now accepts the handler
 func Routes(r *gin.Engine, handler *Handler) {
 	r.Use(RequestIDLogger())
 

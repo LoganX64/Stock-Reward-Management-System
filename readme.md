@@ -27,8 +27,9 @@ The system maintains a **double-entry ledger** to track stock units, INR outflow
 - Provide historical and portfolio statistics.
 - Standardized response handling across all endpoints.
 - Request ID tracking for better debugging and logging.
-- Background Go worker for automatic price updates with caching and fallback mechanisms.
-- Graceful handling of external API downtime.
+- Background Go worker for automatic price updates with **concurrent worker pools** and **semaphore-based resource limiting**.
+- **Double-Entry Ledger** tracking units, cash flows, and company-incurred taxes (STT, GST).
+- **Virtual Stock Split Logic**: Using SQL Views and logarithmic product aggregation (`EXP(SUM(LN(ratio)))`) to calculate real-time adjusted holdings without expensive batch updates.
 
 ---
 
@@ -236,16 +237,19 @@ The API uses a standardized response package for consistent error and success re
 
 ### Price Update System
 
-The system includes a robust price update mechanism with:
+The system includes a sophisticated background worker for price synchronization, designed for high performance and reliability:
 
-1. Hourly automatic updates
-2. In-memory price caching
-3. Multiple fallback layers:
-   - External API attempt
-   - Recent cached prices
-   - Last known good price
-4. Staleness tracking
-5. Configurable retry mechanisms
+1.  **Worker Pool Architecture**: Utilizes a configurable pool of concurrent workers to process stock price updates in parallel, maximizing throughput.
+2.  **Concurrency Control (Semaphores)**: Implements a **weighted semaphore** (via buffered channels) to strictly limit concurrent database writes, preventing connection exhaustion and ensuring system stability during mass updates.
+3.  **In-Memory Caching**: A thread-safe `PriceCache` with `RWMutex` provides sub-millisecond access to latest prices, significantly reducing database load for read-heavy operations.
+4.  **Multiple Fallback Layers**:
+    - Primary: External API fetch.
+    - Secondary: Recent in-memory cached prices.
+    - Tertiary: Last known good price from historical records with "dampened" estimation logic.
+5.  **Robustness Features**:
+    - **Exponential Backoff**: Automatic retry logic for database operations.
+    - **Panic Recovery**: Each worker is wrapped in a recovery defer block to prevent a single malformed job from crashing the entire pipeline.
+    - **Context-Aware**: Full support for graceful shutdowns via `context.Context`.
 
 ### Resilience Features
 

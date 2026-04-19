@@ -15,7 +15,7 @@ import (
 )
 
 // =======================
-// Interfaces (unchanged)
+// Interfaces
 // =======================
 
 type DB interface {
@@ -33,7 +33,7 @@ type PriceFetcher interface {
 }
 
 // =======================
-// PriceCache (unchanged)
+// PriceCache
 // =======================
 
 type PriceCache struct {
@@ -64,7 +64,7 @@ func (pc *PriceCache) GetPrice(symbol string) (float64, time.Time, bool) {
 }
 
 // =======================
-// RandomPriceFetcher (unchanged)
+// RandomPriceFetcher
 // =======================
 
 type RandomPriceFetcher struct {
@@ -92,7 +92,7 @@ func (r *RandomPriceFetcher) GetLatestPrice(symbol string, lastPrice float64) (f
 }
 
 // =======================
-// Options & PriceService (unchanged structure)
+// Options & PriceService
 // =======================
 
 type PriceServiceOptions struct {
@@ -164,7 +164,7 @@ func NewPriceService(db DB, cache Cache, fetcher PriceFetcher, opts *PriceServic
 }
 
 // =======================
-// Scheduler (unchanged)
+// Scheduler
 // =======================
 
 func (s *PriceService) Start(ctx context.Context) {
@@ -218,7 +218,7 @@ func (s *PriceService) triggerUpdate(ctx context.Context) {
 }
 
 // =======================
-// Cache initialization (unchanged)
+// Cache initialization
 // =======================
 
 func (s *PriceService) initializeCache(ctx context.Context) {
@@ -234,7 +234,7 @@ func (s *PriceService) initializeCache(ctx context.Context) {
 }
 
 // =======================
-// Worker pipeline (unchanged)
+// Worker pipeline
 // =======================
 
 type PriceJob struct {
@@ -304,7 +304,7 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 }
 
 // =======================
-// Core logic with improved logging
+// Core logic
 // =======================
 
 func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
@@ -346,7 +346,7 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 	// Update cache
 	s.cache.SetPrice(job.Symbol, newPrice, s.opts.Now())
 
-	// Log successful update with clear before/after
+	// Log successful update
 	log.WithFields(logrus.Fields{
 		"old_price": job.OldPrice,
 		"new_price": newPrice,
@@ -360,7 +360,7 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 }
 
 // =======================
-// DB helpers (unchanged)
+// DB helpers
 // =======================
 
 func (s *PriceService) querySymbolPrices(ctx context.Context) ([]PriceJob, error) {
