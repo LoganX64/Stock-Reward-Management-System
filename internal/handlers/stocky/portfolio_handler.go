@@ -59,6 +59,11 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		item.INRValue = utils.RoundAmount(item.INRValue)
 		portfolio = append(portfolio, item)
 	}
+	if err := rows.Err(); err != nil {
+		logger.WithError(err).Error("Error iterating portfolio rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":    userID,
 		"portfolio": utils.OrEmpty(portfolio),
