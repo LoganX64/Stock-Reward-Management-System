@@ -135,7 +135,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				Reward_ID:    rewardID,
 				Entry_Type:   models.StockUnits,
 				Stock_Symbol: stockSymbol,
-				Quantity:     -req.DeltaQuantity, // remove shares
+				Quantity:     req.DeltaQuantity, // same signed delta as reward update
 				Amount:       0,
 			})
 		}
