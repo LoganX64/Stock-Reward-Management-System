@@ -14,7 +14,7 @@ func setupStatsRouter() *gin.Engine {
 	handler := NewHandler(nil)
 
 	router := gin.New()
-	router.GET("/api/v1/stats/:user_id", handler.StatsHandler)
+	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
 
 	return router
 }

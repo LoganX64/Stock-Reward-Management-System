@@ -14,7 +14,7 @@ func setupPortfolioRouter() *gin.Engine {
 	handler := NewHandler(nil)
 
 	router := gin.New()
-	router.GET("/api/v1/portfolio/:user_id", handler.PortfolioHandler)
+	router.GET("/api/v1/portfolio/:userId", handler.PortfolioHandler)
 
 	return router
 }

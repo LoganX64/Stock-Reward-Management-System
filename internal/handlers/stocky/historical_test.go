@@ -14,7 +14,7 @@ func setupHistoricalRouter() *gin.Engine {
 	handler := NewHandler(nil)
 
 	router := gin.New()
-	router.GET("/api/v1/historical/:user_id", handler.GetHistoricalINR)
+	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
 
 	return router
 }

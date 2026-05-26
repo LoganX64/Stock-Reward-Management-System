@@ -14,7 +14,7 @@ func setupTodayStocksRouter() *gin.Engine {
 	handler := NewHandler(nil)
 
 	router := gin.New()
-	router.GET("/api/v1/today-stocks/:user_id", handler.GetTodayStocks)
+	router.GET("/api/v1/today-stocks/:userId", handler.GetTodayStocks)
 
 	return router
 }
