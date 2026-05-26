@@ -100,7 +100,8 @@ type TodayStock struct {
 }
 
 type CreateRewardRequest struct {
-	UserID      int     `json:"user_id"`
-	StockSymbol string  `json:"stock_symbol"`
-	Quantity    float64 `json:"quantity"`
+	UserID         int     `json:"user_id"`
+	StockSymbol    string  `json:"stock_symbol"`
+	Quantity       float64 `json:"quantity"`
+	IdempotencyKey string  `json:"idempotency_key"`
 }

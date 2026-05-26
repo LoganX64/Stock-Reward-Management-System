@@ -49,11 +49,11 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 
-	// Safe rollback on error or panic
+	// Ensure transaction is rolled back if not committed
+	committed := false
 	defer func() {
-		if p := recover(); p != nil {
+		if !committed {
 			_ = tx.Rollback()
-			panic(p)
 		}
 	}()
 
@@ -62,12 +62,10 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`,
 		req.UserID).Scan(&userExists); err != nil {
 		logger.WithError(err).Error("User existence check failed")
-		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
 	if !userExists {
-		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("User does not exist"))
 		return
 	}
@@ -75,7 +73,6 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	// Fetch current price
 	var currentPrice float64
 	if err := tx.QueryRowContext(ctx, `SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
-		_ = tx.Rollback()
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Stock symbol not found"))
 			return
@@ -88,23 +85,59 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	// Insert reward
 	var reward models.Reward
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO rewards (user_id, stock_symbol, quantity, created_at)
-		VALUES ($1, $2, $3, NOW())
-		RETURNING id, user_id, stock_symbol, quantity, created_at`,
+		INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		RETURNING id, user_id, stock_symbol, quantity, idempotency_key, created_at`,
 		req.UserID,
 		req.StockSymbol,
 		req.Quantity,
+		req.IdempotencyKey,
 	).Scan(
 		&reward.ID,
 		&reward.User_ID,
 		&reward.Stock_Symbol,
 		&reward.Quantity,
+		&reward.IdempotencyKey,
 		&reward.CreatedAt,
 	)
 
 	if err != nil {
-		_ = tx.Rollback()
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			// Duplicate key - check if it's an idempotency key duplicate
+			if req.IdempotencyKey != "" {
+				// Fetch and return the existing reward for this idempotency key
+				err = tx.QueryRowContext(ctx, `
+					SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
+					FROM rewards
+					WHERE idempotency_key = $1
+				`, req.IdempotencyKey).Scan(
+					&reward.ID,
+					&reward.User_ID,
+					&reward.Stock_Symbol,
+					&reward.Quantity,
+					&reward.IdempotencyKey,
+					&reward.CreatedAt,
+				)
+				if err != nil {
+					logger.WithError(err).Error("Failed to fetch existing reward")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				// Commit and return the existing reward - idempotent retry
+				if err := tx.Commit(); err != nil {
+					logger.WithError(err).Error("Failed to commit transaction")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				committed = true
+				response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
+					"message":           "Reward already created (idempotent retry)",
+					"rewardId":          reward.ID,
+					"idempotent_replay": true,
+				})
+				return
+			}
+			// Unique constraint violation on user_stock_date
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
 			return
 		}
@@ -180,7 +213,6 @@ func (h *Handler) CreateReward(c *gin.Context) {
 			entry.Stock_Symbol,
 			utils.RoundQuantity(entry.Quantity),
 			utils.RoundAmount(entry.Amount)); err != nil {
-			_ = tx.Rollback()
 			logger.WithError(err).Error("Failed to insert ledger entry")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
@@ -193,6 +225,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+	committed = true
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"message":    "Reward created successfully",
