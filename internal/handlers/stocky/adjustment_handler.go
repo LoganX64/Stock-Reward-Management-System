@@ -55,11 +55,11 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 
-	// safe rollback in case of panic
+	// Ensure transaction is rolled back if not committed
+	committed := false
 	defer func() {
-		if p := recover(); p != nil {
+		if !committed {
 			_ = tx.Rollback()
-			panic(p)
 		}
 	}()
 
@@ -82,7 +82,6 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 	}
 	// Prevent negative quantity
 	if currentQty+req.DeltaQuantity < 0 {
-		_ = tx.Rollback()
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
@@ -121,7 +120,6 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 `, req.DeltaQuantity, rewardID)
 
 	if err != nil {
-		_ = tx.Rollback()
 		logger.WithError(err).Error("Failed to update reward quantity")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
@@ -186,7 +184,6 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 			entry.Stock_Symbol,
 			utils.RoundQuantity(entry.Quantity),
 			utils.RoundAmount(entry.Amount)); err != nil {
-			_ = tx.Rollback()
 			logger.WithError(err).Error("Failed to insert ledger entry")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("failed to update ledger"))
 			return
@@ -199,6 +196,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+	committed = true
 
 	logger.WithFields(logrus.Fields{
 		"adjustment_id": inserted.ID,

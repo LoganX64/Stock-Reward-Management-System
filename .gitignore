@@ -37,4 +37,7 @@ database
 
 /config
 .yaml
+system_design.md
+CODE_REVIEW.md
+features.md
 
