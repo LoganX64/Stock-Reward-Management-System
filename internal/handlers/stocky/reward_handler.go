@@ -1,43 +1,11 @@
 package stocky
 
 import (
-    "context"
-    "database/sql"
-    "time"
-)
-
-// CreateRewardRequest is the minimal request structure used by the insert helper.
-type CreateRewardRequest struct {
-    UserID         int64     `json:"user_id"`
-    StockID        int64     `json:"stock_id"`
-    RewardDate     time.Time `json:"reward_date"`
-    IdempotencyKey string    `json:"idempotency_key"`
-    Quantity       int64     `json:"quantity"`
-}
-
-// InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
-func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql.Result, error) {
-    // Use sql.NullString so the driver writes SQL NULL when the key is empty.
-    var idemp sql.NullString
-    if req.IdempotencyKey != "" {
-        idemp = sql.NullString{String: req.IdempotencyKey, Valid: true}
-    } else {
-        idemp = sql.NullString{Valid: false}
-    }
-
-	insertSQL := `INSERT INTO rewards (user_id, stock_id, reward_date, idempotency_key, quantity, created_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())`
-
-    return db.ExecContext(ctx, insertSQL, req.UserID, req.StockID, req.RewardDate, idemp, req.Quantity)
-}
-package stocky
-
-import (
 	"context"
 	"database/sql"
 	"math"
-
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -48,9 +16,33 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// CreateRewardRequest is the minimal request structure used by the insert helper.
+type CreateRewardRequest struct {
+	UserID         int64     `json:"user_id"`
+	StockID        int64     `json:"stock_id"`
+	RewardDate     time.Time `json:"reward_date"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Quantity       int64     `json:"quantity"`
+}
+
+// InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
+func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql.Result, error) {
+	// Use sql.NullString so the driver writes SQL NULL when the key is empty.
+	var idemp sql.NullString
+	if req.IdempotencyKey != "" {
+		idemp = sql.NullString{String: req.IdempotencyKey, Valid: true}
+	} else {
+		idemp = sql.NullString{Valid: false}
+	}
+
+	insertSQL := `INSERT INTO rewards (user_id, stock_id, reward_date, idempotency_key, quantity, created_at)
+        VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())`
+
+	return db.ExecContext(ctx, insertSQL, req.UserID, req.StockID, req.RewardDate, idemp, req.Quantity)
+}
+
 func (h *Handler) CreateReward(c *gin.Context) {
 	logger := logrus.WithField("request_id", requestID(c))
-
 	var req models.CreateRewardRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -116,14 +108,15 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 	// Insert reward
 	var reward models.Reward
+	idempotencyParam := sql.NullString{String: req.IdempotencyKey, Valid: req.IdempotencyKey != ""}
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
-		VALUES ($1, $2, $3, $4, NOW())
+		VALUES ($1, $2, $3, NULLIF($4, ''), NOW())
 		RETURNING id, user_id, stock_symbol, quantity, idempotency_key, created_at`,
 		req.UserID,
 		req.StockSymbol,
 		req.Quantity,
-		req.IdempotencyKey,
+		idempotencyParam,
 	).Scan(
 		&reward.ID,
 		&reward.User_ID,
@@ -135,43 +128,54 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-			// Duplicate key - check if it's an idempotency key duplicate
-			if req.IdempotencyKey != "" {
-				// Fetch and return the existing reward for this idempotency key
-				err = tx.QueryRowContext(ctx, `
-					SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
-					FROM rewards
-					WHERE idempotency_key = $1
-				`, req.IdempotencyKey).Scan(
-					&reward.ID,
-					&reward.User_ID,
-					&reward.Stock_Symbol,
-					&reward.Quantity,
-					&reward.IdempotencyKey,
-					&reward.CreatedAt,
-				)
-				if err != nil {
-					logger.WithError(err).Error("Failed to fetch existing reward")
-					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			switch pqErr.Constraint {
+			case "unique_user_stock_date":
+				response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
+				return
+			case "rewards_idempotency_key_key":
+				fallthrough
+			default:
+				if strings.Contains(pqErr.Constraint, "idempotency") {
+					// Fetch the existing reward for this idempotency key
+					err = tx.QueryRowContext(ctx, `
+						SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
+						FROM rewards
+						WHERE idempotency_key = $1
+					`, req.IdempotencyKey).Scan(
+						&reward.ID,
+						&reward.User_ID,
+						&reward.Stock_Symbol,
+						&reward.Quantity,
+						&reward.IdempotencyKey,
+						&reward.CreatedAt,
+					)
+					if err != nil {
+						logger.WithError(err).Error("Failed to fetch existing reward")
+						response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+						return
+					}
+
+					if reward.User_ID != req.UserID || reward.Stock_Symbol != req.StockSymbol || reward.Quantity != req.Quantity {
+						response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
+						return
+					}
+
+					if err := tx.Commit(); err != nil {
+						logger.WithError(err).Error("Failed to commit transaction")
+						response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+						return
+					}
+					committed = true
+					response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
+						"message":           "Reward already created (idempotent retry)",
+						"rewardId":          reward.ID,
+						"idempotent_replay": true,
+					})
 					return
 				}
-				// Commit and return the existing reward - idempotent retry
-				if err := tx.Commit(); err != nil {
-					logger.WithError(err).Error("Failed to commit transaction")
-					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-					return
-				}
-				committed = true
-				response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-					"message":           "Reward already created (idempotent retry)",
-					"rewardId":          reward.ID,
-					"idempotent_replay": true,
-				})
+				response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
 				return
 			}
-			// Unique constraint violation on user_stock_date
-			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
-			return
 		}
 		logger.WithError(err).Error("Failed to insert reward")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
