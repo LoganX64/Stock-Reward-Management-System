@@ -1,6 +1,38 @@
 package stocky
 
 import (
+    "context"
+    "database/sql"
+    "time"
+)
+
+// CreateRewardRequest is the minimal request structure used by the insert helper.
+type CreateRewardRequest struct {
+    UserID         int64     `json:"user_id"`
+    StockID        int64     `json:"stock_id"`
+    RewardDate     time.Time `json:"reward_date"`
+    IdempotencyKey string    `json:"idempotency_key"`
+    Quantity       int64     `json:"quantity"`
+}
+
+// InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
+func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql.Result, error) {
+    // Use sql.NullString so the driver writes SQL NULL when the key is empty.
+    var idemp sql.NullString
+    if req.IdempotencyKey != "" {
+        idemp = sql.NullString{String: req.IdempotencyKey, Valid: true}
+    } else {
+        idemp = sql.NullString{Valid: false}
+    }
+
+	insertSQL := `INSERT INTO rewards (user_id, stock_id, reward_date, idempotency_key, quantity, created_at)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())`
+
+    return db.ExecContext(ctx, insertSQL, req.UserID, req.StockID, req.RewardDate, idemp, req.Quantity)
+}
+package stocky
+
+import (
 	"context"
 	"database/sql"
 	"math"

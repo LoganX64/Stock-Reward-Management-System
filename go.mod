@@ -1,3 +1,8 @@
+module github.com/example/stock-rewards
+
+go 1.20
+
+require github.com/DATA-DOG/go-sqlmock v1.6.0
 module github.com/LoganX64/stocky-api
 
 go 1.25.1
