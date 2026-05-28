@@ -115,6 +115,11 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	// Insert reward
 	var reward models.Reward
 	idempotencyParam := sql.NullString{String: req.IdempotencyKey, Valid: req.IdempotencyKey != ""}
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT reward_insert`); err != nil {
+		logger.WithError(err).Error("Failed to create reward insert savepoint")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
 		VALUES ($1, $2, $3, NULLIF($4, ''), NOW())
@@ -134,6 +139,12 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT reward_insert`); rollbackErr != nil {
+				logger.WithError(rollbackErr).Error("Failed to roll back reward insert savepoint")
+				response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+				return
+			}
+
 			if req.IdempotencyKey != "" {
 				err = tx.QueryRowContext(ctx, `
 					SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at

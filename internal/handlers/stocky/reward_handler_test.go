@@ -188,6 +188,8 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)")).
 		WithArgs("TCS").
 		WillReturnRows(sqlmock.NewRows([]string{"price"}).AddRow(100.0))
+	mock.ExpectExec("SAVEPOINT reward_insert").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO rewards").
 		WithArgs(1, "TCS", 2.0, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -256,12 +258,16 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)")).
 		WithArgs("TCS").
 		WillReturnRows(sqlmock.NewRows([]string{"price"}).AddRow(100.0))
+	mock.ExpectExec("SAVEPOINT reward_insert").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("INSERT INTO rewards").
 		WithArgs(1, "TCS", 2.0, sqlmock.AnyArg()).
 		WillReturnError(&pq.Error{
 			Code:       "23505",
 			Constraint: "unique_user_stock_date",
 		})
+	mock.ExpectExec("ROLLBACK TO SAVEPOINT reward_insert").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at").
 		WithArgs("retry-key").
 		WillReturnRows(sqlmock.NewRows([]string{
