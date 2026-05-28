@@ -156,7 +156,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
-				Amount:     -req.DeltaAmount, // usually money coming back
+				Amount:     req.DeltaAmount, // money returned
 			})
 		}
 	case models.Fee_Refund:
