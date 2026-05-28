@@ -22,7 +22,7 @@ func setupHistoricalRouter() *gin.Engine {
 func TestGetHistoricalINR_InvalidUserID(t *testing.T) {
 	router := setupHistoricalRouter()
 
-	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical/abc", nil)
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/abc", nil)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
