@@ -1,13 +1,15 @@
-module github.com/example/stock-rewards
-
-go 1.20
-
-require github.com/DATA-DOG/go-sqlmock v1.6.0
 module github.com/LoganX64/stocky-api
 
 go 1.25.1
 
-require github.com/sirupsen/logrus v1.9.3
+require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/gin-gonic/gin v1.11.0
+	github.com/golang-migrate/migrate/v4 v4.19.0
+	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.10.9
+	github.com/sirupsen/logrus v1.9.3
+)
 
 require (
 	github.com/bytedance/sonic v1.14.0 // indirect
@@ -44,10 +46,4 @@ require (
 	google.golang.org/protobuf v1.36.9 // indirect
 )
 
-require (
-	github.com/gin-gonic/gin v1.11.0
-	github.com/golang-migrate/migrate/v4 v4.19.0
-	github.com/joho/godotenv v1.5.1
-	github.com/lib/pq v1.10.9
-	golang.org/x/sys v0.35.0 // indirect
-)
+require golang.org/x/sys v0.35.0 // indirect
