@@ -1,0 +1,9 @@
+-- INSERT INTO stock_price_history (stock_symbol, price, date)
+-- VALUES 
+--     ('TCS', 3500.00, CURRENT_DATE),
+--     ('INFY', 1450.00, CURRENT_DATE),
+--     ('RELIANCE', 2500.00, CURRENT_DATE)
+-- ON CONFLICT (stock_symbol, date) 
+-- DO UPDATE SET 
+--     price = EXCLUDED.price,
+--     created_at = NOW();
