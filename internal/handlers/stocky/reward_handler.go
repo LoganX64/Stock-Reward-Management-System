@@ -18,11 +18,10 @@ import (
 
 // CreateRewardRequest is the minimal request structure used by the insert helper.
 type CreateRewardRequest struct {
-	UserID         int64     `json:"user_id"`
-	StockID        int64     `json:"stock_id"`
-	RewardDate     time.Time `json:"reward_date"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	Quantity       int64     `json:"quantity"`
+	UserID         int64   `json:"user_id"`
+	StockSymbol    string  `json:"stock_symbol"`
+	IdempotencyKey string  `json:"idempotency_key"`
+	Quantity       float64 `json:"quantity"`
 }
 
 // InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
@@ -35,10 +34,10 @@ func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql
 		idemp = sql.NullString{Valid: false}
 	}
 
-	insertSQL := `INSERT INTO rewards (user_id, stock_id, reward_date, idempotency_key, quantity, created_at)
-        VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())`
+	insertSQL := `INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
+        VALUES ($1, $2, $3, NULLIF($4, ''), NOW())`
 
-	return db.ExecContext(ctx, insertSQL, req.UserID, req.StockID, req.RewardDate, idemp, req.Quantity)
+	return db.ExecContext(ctx, insertSQL, req.UserID, req.StockSymbol, req.Quantity, idemp)
 }
 
 func (h *Handler) CreateReward(c *gin.Context) {
