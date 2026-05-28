@@ -63,13 +63,14 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		}
 	}()
 
-	// Fetch quantity AND stock_symbol in a SINGLE query
+	// Fetch quantity AND stock_symbol in a SINGLE query and lock the reward row for update
 	var currentQty float64
 	var stockSymbol string
 	err = tx.QueryRowContext(ctx, `
 		SELECT quantity, stock_symbol 
 		FROM rewards 
 		WHERE id = $1
+		FOR UPDATE
 	`, rewardID).Scan(&currentQty, &stockSymbol)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -112,16 +113,28 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 
-	// Update the main reward's quantity
-	_, err = tx.ExecContext(ctx, `
+	// Update the main reward's quantity with a safety check to ensure the row remains non-negative
+	res, err := tx.ExecContext(ctx, `
     UPDATE rewards 
     SET quantity = quantity + $1 
     WHERE id = $2
+      AND quantity + $1 >= 0
 `, req.DeltaQuantity, rewardID)
 
 	if err != nil {
 		logger.WithError(err).Error("Failed to update reward quantity")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		logger.WithError(err).Error("Failed to verify reward quantity update")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+	if rowsAffected == 0 {
+		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
 
