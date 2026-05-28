@@ -134,34 +134,27 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-			switch pqErr.Constraint {
-			case "unique_user_stock_date":
-				response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
-				return
-			case "rewards_idempotency_key_key":
-				fallthrough
-			default:
-				if strings.Contains(pqErr.Constraint, "idempotency") {
-					// Fetch the existing reward for this idempotency key
-					err = tx.QueryRowContext(ctx, `
-						SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
-						FROM rewards
-						WHERE idempotency_key = $1
-					`, req.IdempotencyKey).Scan(
-						&reward.ID,
-						&reward.User_ID,
-						&reward.Stock_Symbol,
-						&reward.Quantity,
-						&reward.IdempotencyKey,
-						&reward.CreatedAt,
-					)
-					if err != nil {
-						logger.WithError(err).Error("Failed to fetch existing reward")
-						response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-						return
-					}
+			if req.IdempotencyKey != "" {
+				err = tx.QueryRowContext(ctx, `
+					SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
+					FROM rewards
+					WHERE idempotency_key = $1
+				`, req.IdempotencyKey).Scan(
+					&reward.ID,
+					&reward.User_ID,
+					&reward.Stock_Symbol,
+					&reward.Quantity,
+					&reward.IdempotencyKey,
+					&reward.CreatedAt,
+				)
+				if err != nil && err != sql.ErrNoRows {
+					logger.WithError(err).Error("Failed to fetch existing reward")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
 
-					if reward.User_ID != req.UserID || reward.Stock_Symbol != req.StockSymbol || reward.Quantity != req.Quantity {
+				if err == nil {
+					if reward.User_ID != req.UserID || normalizeStockSymbol(reward.Stock_Symbol) != req.StockSymbol || reward.Quantity != req.Quantity {
 						response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
 						return
 					}
@@ -179,9 +172,10 @@ func (h *Handler) CreateReward(c *gin.Context) {
 					})
 					return
 				}
-				response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
-				return
 			}
+
+			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward already given today"))
+			return
 		}
 		logger.WithError(err).Error("Failed to insert reward")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))

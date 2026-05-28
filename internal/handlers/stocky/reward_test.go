@@ -9,6 +9,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 func setupCreateRewardRouter() *gin.Engine {
@@ -159,6 +160,65 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for normalized stock symbol, got %d", w.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
+	}
+}
+
+func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.POST("/api/v1/rewards", handler.CreateReward)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)")).
+		WithArgs("TCS").
+		WillReturnRows(sqlmock.NewRows([]string{"price"}).AddRow(100.0))
+	mock.ExpectQuery("INSERT INTO rewards").
+		WithArgs(1, "TCS", 2.0, sqlmock.AnyArg()).
+		WillReturnError(&pq.Error{
+			Code:       "23505",
+			Constraint: "unique_user_stock_date",
+		})
+	mock.ExpectQuery("SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at").
+		WithArgs("retry-key").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id",
+			"user_id",
+			"stock_symbol",
+			"quantity",
+			"idempotency_key",
+			"created_at",
+		}).AddRow(1, 1, "TCS", 2.0, "retry-key", "2026-05-28T00:00:00Z"))
+	mock.ExpectCommit()
+
+	payload := `{
+		"user_id": 1,
+		"stock_symbol": "TCS",
+		"quantity": 2,
+		"idempotency_key": "retry-key"
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for idempotent retry, got %d", w.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)
