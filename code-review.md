@@ -2,26 +2,21 @@
 
 ## Findings
 
-### P0 - `go.mod` is not parseable, so the project cannot build or test
+### P0 - Resolved: `go.mod` is now parseable
 
-**Location:** `go.mod:1`, `go.mod:6`, `go.mod:8`
+**Location:** `go.mod`
 
-The module file contains two `module` declarations and two `go` directives:
+The duplicate `module` and `go` directives were removed. The module now has one canonical path:
 
-- `module github.com/example/stock-rewards`
 - `module github.com/LoganX64/stocky-api`
-- `go 1.20`
+
+It also has one Go directive:
+
 - `go 1.25.1`
 
-This prevents every Go command from loading the module. `go test ./...` currently fails with:
+The direct dependencies were consolidated into one block, and `go-sqlmock` was corrected to the published `v1.5.2` version with matching `go.sum` entries.
 
-```text
-go: errors parsing go.mod:
-go.mod:6: repeated module statement
-go.mod:8: repeated go statement
-```
-
-**Recommendation:** Keep a single module path, likely `github.com/LoganX64/stocky-api`, keep one supported Go version, and merge the dependency blocks.
+**Verification:** `go list ./...` now loads and lists all project packages, confirming the module parse blocker is fixed.
 
 ### P1 - `InsertReward` does not match the actual `rewards` schema
 
@@ -65,10 +60,10 @@ The test registers `/api/v1/historical-inr/:userId` but sends the request to `/a
 
 ## Verification
 
-Command run:
+Command run for the P0 fix:
 
 ```text
-go test ./...
+go list ./...
 ```
 
-Result: failed before compilation because `go.mod` has repeated `module` and `go` statements.
+Result: the module loaded and all packages were listed. Full test execution is intentionally left for the next finding because the next known failure is the historical route test called out above.
