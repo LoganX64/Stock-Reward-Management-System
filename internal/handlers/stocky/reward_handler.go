@@ -26,6 +26,8 @@ type CreateRewardRequest struct {
 
 // InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
 func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql.Result, error) {
+	req.StockSymbol = normalizeStockSymbol(req.StockSymbol)
+
 	// Use sql.NullString so the driver writes SQL NULL when the key is empty.
 	var idemp sql.NullString
 	if req.IdempotencyKey != "" {
@@ -38,6 +40,10 @@ func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql
         VALUES ($1, $2, $3, NULLIF($4, ''), NOW())`
 
 	return db.ExecContext(ctx, insertSQL, req.UserID, req.StockSymbol, req.Quantity, idemp)
+}
+
+func normalizeStockSymbol(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
 }
 
 func (h *Handler) CreateReward(c *gin.Context) {
@@ -55,6 +61,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
 		return
 	}
+	req.StockSymbol = normalizeStockSymbol(req.StockSymbol)
 	if req.StockSymbol == "" {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("stock_symbol is required"))
 		return
