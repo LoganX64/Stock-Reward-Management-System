@@ -51,8 +51,8 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	}
 
 	// Basic validation
-	if req.Quantity == 0 {
-		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity cannot be zero"))
+	if req.Quantity <= 0 {
+		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
 		return
 	}
 	if req.StockSymbol == "" {
