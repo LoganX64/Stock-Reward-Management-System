@@ -31,3 +31,16 @@ func TestGetHistoricalINR_InvalidUserID(t *testing.T) {
 		t.Errorf("expected 400 for invalid user ID, got %d", w.Code)
 	}
 }
+
+func TestGetHistoricalINR_InvalidLimit(t *testing.T) {
+	router := setupHistoricalRouter()
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1?limit=zero", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid limit, got %d", w.Code)
+	}
+}

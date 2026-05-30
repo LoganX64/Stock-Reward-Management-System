@@ -16,6 +16,10 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	if !ok {
 		return
 	}
+	limit, offset, ok := parsePagination(c)
+	if !ok {
+		return
+	}
 
 	logger := logrus.WithFields(logrus.Fields{
 		"request_id": requestID(c),
@@ -35,7 +39,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		WHERE user_id = $1
 		  AND reward_date < CURRENT_DATE
 		ORDER BY reward_date DESC
-	`, userID)
+		LIMIT $2 OFFSET $3
+	`, userID, limit, offset)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch historical INR")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
@@ -77,6 +82,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":  userID,
+		"limit":   limit,
+		"offset":  offset,
 		"history": utils.OrEmpty(history),
 	})
 }

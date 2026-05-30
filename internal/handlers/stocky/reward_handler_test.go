@@ -19,7 +19,7 @@ func setupCreateRewardRouter() *gin.Engine {
 	handler := NewHandler(nil)
 
 	router := gin.New()
-	router.POST("/api/v1/rewards", handler.CreateReward)
+	Routes(router, handler)
 
 	return router
 }
@@ -98,7 +98,7 @@ func TestCreateReward_InvalidJSON(t *testing.T) {
 
 	payload := `{"user_id":`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestCreateReward_ZeroQuantity(t *testing.T) {
 		"quantity": 0
 	}`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestCreateReward_NegativeQuantity(t *testing.T) {
 		"quantity": -5
 	}`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
@@ -157,7 +157,7 @@ func TestCreateReward_MissingStockSymbol(t *testing.T) {
 		"quantity": 10
 	}`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 
 	handler := NewHandler(db)
 	router := gin.New()
-	router.POST("/api/v1/rewards", handler.CreateReward)
+	Routes(router, handler)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")).
@@ -224,7 +224,7 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 		"idempotency_key": "case-test"
 	}`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
@@ -249,7 +249,7 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 
 	handler := NewHandler(db)
 	router := gin.New()
-	router.POST("/api/v1/rewards", handler.CreateReward)
+	Routes(router, handler)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")).
@@ -287,7 +287,7 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 		"idempotency_key": "retry-key"
 	}`
 
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/rewards", bytes.NewBufferString(payload))
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()

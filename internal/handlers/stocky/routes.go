@@ -77,6 +77,41 @@ func parseRewardID(c *gin.Context) (int, bool) {
 	return id, true
 }
 
+func parsePagination(c *gin.Context) (int, int, bool) {
+	const (
+		defaultLimit = 100
+		maxLimit     = 500
+	)
+
+	limit := defaultLimit
+	offset := 0
+
+	if rawLimit := c.Query("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			response.WriteJson(c.Writer, http.StatusBadRequest,
+				response.ErrorResponse("invalid limit - must be a positive integer"))
+			return 0, 0, false
+		}
+		if parsed > maxLimit {
+			parsed = maxLimit
+		}
+		limit = parsed
+	}
+
+	if rawOffset := c.Query("offset"); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			response.WriteJson(c.Writer, http.StatusBadRequest,
+				response.ErrorResponse("invalid offset - must be zero or a positive integer"))
+			return 0, 0, false
+		}
+		offset = parsed
+	}
+
+	return limit, offset, true
+}
+
 // Routes now accepts the handler
 func Routes(r *gin.Engine, handler *Handler) {
 	r.Use(RequestIDLogger())

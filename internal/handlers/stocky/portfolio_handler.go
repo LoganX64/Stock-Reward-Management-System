@@ -15,6 +15,10 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	if !ok {
 		return
 	}
+	limit, offset, ok := parsePagination(c)
+	if !ok {
+		return
+	}
 	logger := logrus.WithFields(logrus.Fields{
 		"request_id": requestID(c),
 		"user_id":    userID,
@@ -30,7 +34,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		      FROM stock_events
 		      WHERE event_type = 'delist' AND effective_date <= CURRENT_DATE
 		  ))
-	`, userID)
+		ORDER BY stock_symbol
+		LIMIT $2 OFFSET $3
+	`, userID, limit, offset)
 
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch portfolio data for user ")
@@ -66,6 +72,8 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	}
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":    userID,
+		"limit":     limit,
+		"offset":    offset,
 		"portfolio": utils.OrEmpty(portfolio),
 	})
 }

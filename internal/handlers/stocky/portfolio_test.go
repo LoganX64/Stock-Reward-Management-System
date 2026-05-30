@@ -31,3 +31,16 @@ func TestPortfolioHandler_InvalidUserID(t *testing.T) {
 		t.Errorf("expected 400 for invalid user ID, got %d", w.Code)
 	}
 }
+
+func TestPortfolioHandler_InvalidOffset(t *testing.T) {
+	router := setupPortfolioRouter()
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portfolio/1?offset=-1", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid offset, got %d", w.Code)
+	}
+}
