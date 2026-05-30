@@ -59,7 +59,7 @@ func parseUserID(c *gin.Context) (int, bool) {
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id <= 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest,
-			response.ErrorResponse("invalid userId – must be a positive integer"))
+			response.ErrorResponse("invalid userId - must be a positive integer"))
 		return 0, false
 	}
 	return id, true
@@ -71,7 +71,7 @@ func parseRewardID(c *gin.Context) (int, bool) {
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id <= 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest,
-			response.ErrorResponse("invalid reward ID – must be a positive integer"))
+			response.ErrorResponse("invalid reward ID - must be a positive integer"))
 		return 0, false
 	}
 	return id, true

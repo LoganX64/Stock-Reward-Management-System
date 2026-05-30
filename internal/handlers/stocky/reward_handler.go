@@ -123,7 +123,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
 		VALUES ($1, $2, $3, NULLIF($4, ''), NOW())
-		RETURNING id, user_id, stock_symbol, quantity, idempotency_key, created_at`,
+		RETURNING id, user_id, stock_symbol, quantity, COALESCE(idempotency_key, ''), created_at`,
 		req.UserID,
 		req.StockSymbol,
 		req.Quantity,
@@ -147,7 +147,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 			if req.IdempotencyKey != "" {
 				err = tx.QueryRowContext(ctx, `
-					SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at
+					SELECT id, user_id, stock_symbol, quantity, COALESCE(idempotency_key, ''), created_at
 					FROM rewards
 					WHERE idempotency_key = $1
 				`, req.IdempotencyKey).Scan(

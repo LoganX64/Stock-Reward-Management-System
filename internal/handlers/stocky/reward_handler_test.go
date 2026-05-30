@@ -268,7 +268,7 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 		})
 	mock.ExpectExec("ROLLBACK TO SAVEPOINT reward_insert").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SELECT id, user_id, stock_symbol, quantity, idempotency_key, created_at").
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, user_id, stock_symbol, quantity, COALESCE(idempotency_key, ''), created_at")).
 		WithArgs("retry-key").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id",
