@@ -38,7 +38,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		FROM historical_rewards
 		WHERE user_id = $1
 		  AND reward_date < CURRENT_DATE
-		ORDER BY reward_date DESC
+		ORDER BY reward_date DESC, reward_event_id DESC
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
 	if err != nil {
