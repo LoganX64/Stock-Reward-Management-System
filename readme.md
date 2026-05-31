@@ -2,70 +2,115 @@
 
 ## Project Overview
 
-Stocky is a stock rewards management API built in **Golang** using the **Gin** framework and **PostgreSQL**.  
-It allows tracking of rewards in Indian stocks, applying adjustments, and calculating the portfolio value in INR.  
-The system maintains a **double-entry ledger** to track stock units, INR outflows, and company-incurred fees.
+Stocky is a stock rewards management API built in **Golang** using the **Gin** framework and **PostgreSQL**.
+It tracks stock rewards, adjustments, ledger entries, and INR portfolio values.
 
-### Technologies Used:
+The system maintains a ledger for stock units, INR outflows, brokerage, STT, and GST. It also supports stock events such as splits, bonus issues, mergers, and delisting through SQL views.
 
-- **Go** (Golang) - Backend programming language
-- **Gin** - Web framework for HTTP routing and middleware
+### Technologies Used
+
+- **Go** - Backend programming language
+- **Gin** - HTTP routing and middleware
 - **PostgreSQL** - Relational database
 - **golang-migrate** - Database migration tool
 - **logrus** - Structured logging
-- **go-playground/validator** - Input validation
 - **lib/pq** - PostgreSQL driver
+- **go-sqlmock** - Handler/unit test database mocking
 
-### Key Features:
+### Key Features
 
-- Record stock rewards for users with idempotency support.
-- Track adjustments and refunds for previous rewards (reversals, fee refunds, manual corrections).
-- Maintain a double-entry ledger for stock units, cash flows, and fees.
-- Automatic fee calculation (brokerage, STT, GST) for positive rewards.
-- Fetch latest stock prices and calculate INR valuations.
-- Support stock splits, mergers, bonus issues, and delisting events.
-- Provide historical and portfolio statistics.
-- Standardized response handling across all endpoints.
-- Request ID tracking for better debugging and logging.
-- Background Go worker for automatic price updates with **concurrent worker pools** and **semaphore-based resource limiting**.
-- **Double-Entry Ledger** tracking units, cash flows, and company-incurred taxes (STT, GST).
-- **Virtual Stock Split Logic**: Using SQL Views and logarithmic product aggregation (`EXP(SUM(LN(ratio)))`) to calculate real-time adjusted holdings without expensive batch updates.
+- Record stock rewards with optional idempotency keys.
+- Prevent duplicate same-day rewards per user and stock.
+- Normalize stock symbols before storing rewards.
+- Calculate reward INR value and fees for positive rewards.
+- Track adjustments and refunds for previous rewards.
+- Maintain ledger entries for stock units, cash flows, and fees.
+- Calculate current portfolio and historical INR values.
+- Support stock splits, bonus issues, mergers, and delisting.
+- Paginate historical INR and portfolio endpoints.
+- Track request IDs for logs.
+- Run a simulated background price updater with worker concurrency and database retry logic.
 
 ---
 
 ## API Endpoints
 
-| Method | Endpoint                         | Description                                  |
-| ------ | -------------------------------- | -------------------------------------------- |
-| GET    | `/health`                        | Health check endpoint.                       |
-| POST   | `/api/v1/reward`                 | Create a reward entry.                       |
-| GET    | `/api/v1/today-stocks/:userId`   | Fetch rewards for today with adjustments.    |
-| GET    | `/api/v1/historical-inr/:userId` | Get historical INR valuation (before today). |
-| GET    | `/api/v1/stats/:userId`          | Get total today rewards and portfolio value. |
-| GET    | `/api/v1/portfolio/:userId`      | Get portfolio details per stock.             |
-| POST   | `/api/v1/adjustments/:id`        | Apply adjustment to a reward.                |
+| Method | Endpoint                         | Description                                |
+| ------ | -------------------------------- | ------------------------------------------ |
+| GET    | `/health`                        | Health check endpoint.                     |
+| POST   | `/api/v1/reward`                 | Create a reward entry.                     |
+| POST   | `/api/v1/adjustments/:id`        | Apply adjustment to a reward.              |
+| GET    | `/api/v1/today-stocks/:userId`   | Fetch today's rewards with adjustments.    |
+| GET    | `/api/v1/historical-inr/:userId` | Get historical INR valuation before today. |
+| GET    | `/api/v1/stats/:userId`          | Get today's rewards and portfolio value.   |
+| GET    | `/api/v1/portfolio/:userId`      | Get portfolio details per stock.           |
+
+### Pagination
+
+The historical INR and portfolio endpoints support `limit` and `offset` query parameters:
+
+```text
+GET /api/v1/historical-inr/:userId?limit=100&offset=0
+GET /api/v1/portfolio/:userId?limit=100&offset=0
+```
+
+- `limit` defaults to `100`.
+- `limit` is capped at `500`.
+- `offset` defaults to `0`.
+- `limit` must be a positive integer.
+- `offset` must be zero or a positive integer.
+
+Historical INR results are returned newest first with stable ordering:
+
+```sql
+ORDER BY reward_date DESC, reward_event_id DESC
+```
+
+Example response:
+
+```json
+{
+  "userId": 1,
+  "limit": 100,
+  "offset": 0,
+  "history": []
+}
+```
+
+Portfolio responses use the same pagination metadata:
+
+```json
+{
+  "userId": 1,
+  "limit": 100,
+  "offset": 0,
+  "portfolio": []
+}
+```
 
 ---
 
 ## Database Schema
 
-The project uses PostgreSQL with the following tables:
+The project uses PostgreSQL with the following main tables and views:
 
 - `users`: User information.
-- `rewards`: Records reward events.
-- `ledger`: Double-entry ledger tracking stock units, INR outflow, and fees.
+- `rewards`: Reward events with optional idempotency keys.
+- `ledger`: Stock units, INR outflows, and fee entries.
 - `stock_prices`: Latest stock prices.
-- `stock_events`: Tracks stock splits, mergers, bonus issues, delisting.
-- `adjustments`: Tracks manual corrections, fee refunds, or reward reversals.
-- `user_portfolio` (VIEW): Aggregates portfolio holdings with adjustments applied.
+- `stock_price_history`: Daily stock price history.
+- `stock_events`: Splits, bonus issues, mergers, and delisting events.
+- `adjustments`: Manual corrections, fee refunds, and reward reversals.
+- `today_rewards` (VIEW): Today's reward values.
+- `historical_rewards` (VIEW): Historical reward values.
+- `user_portfolio` (VIEW): Aggregated current portfolio holdings.
 
-### Key Relationships:
+### Key Relationships
 
-- `users` → `rewards` (user_id)
-- `rewards` → `ledger` (reward_id)
-- `rewards` → `adjustments` (reward_id)
-- `stock_events` → `stock_prices` (stock_symbol)
-- `user_portfolio` aggregates all relevant data.
+- `users` -> `rewards` (`user_id`)
+- `rewards` -> `ledger` (`reward_id`)
+- `rewards` -> `adjustments` (`reward_id`)
+- `stock_events` -> `stock_prices` (`stock_symbol`)
 
 ---
 
@@ -73,202 +118,174 @@ The project uses PostgreSQL with the following tables:
 
 ### Prerequisites
 
-- **For Local Development:**
-  - Go (version 1.25 or later) installed
-  - PostgreSQL installed and running locally
-  - Create a database named `assignment` (or update in `.env.local`)
-
-- **For Docker:**
-  - Docker & Docker Compose installed
+- Go 1.25 or later
+- PostgreSQL
+- Docker and Docker Compose, if running with containers
 
 ### Running Locally
 
-1. **Set up PostgreSQL:**
-   - Ensure PostgreSQL is running with user `postgres`, password `9908` (or update `.env.local`).
-   - Create database: `assignment`.
+1. Set up PostgreSQL and create the configured database.
+2. Configure environment variables in `.env.local` or your shell.
+3. Run the API:
 
-2. **Clone and Run:**
+```bash
+go run ./cmd/stocky-api/main.go
+```
 
-   ```bash
-   git clone <repository-url>
-   cd stocky-api
-   go run ./cmd/stocky-api/main.go
-   ```
+The API is available at:
 
-3. **Access the API:**
-   - API available at: `http://localhost:8080`
-   - Background price updater (Go worker) runs automatically to fetch and update stock prices.
+```text
+http://localhost:8080
+```
 
 ### Using Docker
 
-1. **Build and Start Services:**
+```bash
+docker-compose up --build
+```
 
-   ```bash
-   docker-compose up --build
-   ```
+For detached mode:
 
-   - For detached mode: `docker-compose up --build -d`
+```bash
+docker-compose up --build -d
+```
 
-2. **Access the API:**
-   - API available at: `http://localhost:8080`
-   - Database: PostgreSQL on port 5432
-   - Background price updater runs inside the container.
+---
 
-### Environment Variables
+## Environment Variables
 
-- **Local (`.env.local`):**
-  - `DB_HOST=localhost`
-  - `POSTGRES_USER=postgres`
-  - `POSTGRES_PASSWORD=9908`
-  - `POSTGRES_DB=assignment`
-  - `DB_PORT=5432`
-  - `HTTP_PORT=8080`
-  - `MIGRATION_PATH=./internal/database/migrations`
+The application loads `.env.local` by default. Set `ENV_FILE` to use another file, such as `.env.docker`.
 
-- **Docker (`.env.docker`):**
-  - `DB_HOST=db`
-  - `POSTGRES_USER=stocky_user`
-  - `POSTGRES_PASSWORD=stocky_pass`
-  - `POSTGRES_DB=stocky`
-  - `DB_PORT=5432`
-  - `HTTP_PORT=8080`
-  - `MIGRATION_PATH=/app/internal/database/migrations`
+Common local values:
 
-The application automatically loads the appropriate `.env` file based on the `ENV_FILE` environment variable.
+```text
+DB_HOST=localhost
+DB_PORT=5432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=9908
+POSTGRES_DB=assignment
+DB_SSLMODE=disable
+HTTP_PORT=8080
+MIGRATION_PATH=./internal/database/migrations
+```
 
-- `DB_HOST` — Database host (PostgreSQL service)
-- `DB_PORT` — Database port (default: 5432)
-- `DB_USER` — PostgreSQL user
-- `DB_PASSWORD` — PostgreSQL password
-- `DB_NAME` — Database name -`PORT` — API port (default: 8080)
+Common Docker values:
+
+```text
+DB_HOST=db
+DB_PORT=5432
+POSTGRES_USER=stocky_user
+POSTGRES_PASSWORD=stocky_pass
+POSTGRES_DB=stocky
+DB_SSLMODE=disable
+HTTP_PORT=8080
+MIGRATION_PATH=/app/internal/database/migrations
+```
+
+Supported variables:
+
+- `ENV_FILE` - Optional path to the env file to load.
+- `ENV` - Application environment label.
+- `DB_HOST` - Database host.
+- `DB_PORT` - Database port.
+- `POSTGRES_USER` - PostgreSQL user.
+- `POSTGRES_PASSWORD` - PostgreSQL password.
+- `POSTGRES_DB` - PostgreSQL database name.
+- `DB_SSLMODE` - PostgreSQL SSL mode.
+- `HTTP_PORT` - API port.
+- `MIGRATION_PATH` - Path to database migrations.
 
 ---
 
 ## Testing
 
-The project includes unit tests for the API handlers to ensure correctness of reward processing, adjustments, and portfolio calculations.
+Run all tests:
 
-### Test Files
+```bash
+go test ./...
+```
 
-The test files are located in the `internal/handlers/stocky/` directory:
-- `adjustment_test.go` — Tests for manual corrections and reversals.
-- `historical_test.go` — Tests for historical INR valuation.
-- `portfolio_test.go` — Tests for portfolio aggregation.
-- `reward_test.go` — Tests for reward creation and fee calculation.
-- `stats_test.go` — Tests for overall statistics.
-- `todays_test.go` — Tests for today's stock rewards.
-
-### Running Tests
-
-To run all tests in the stocky handler package, use the following command:
+Run only the stocky handler tests:
 
 ```bash
 go test -v github.com/LoganX64/stocky-api/internal/handlers/stocky
 ```
 
+Test files in `internal/handlers/stocky/`:
+
+- `adjustment_test.go` - Tests adjustment validation and reversal ledger behavior.
+- `historical_test.go` - Tests historical endpoint validation.
+- `portfolio_test.go` - Tests portfolio endpoint validation.
+- `reward_handler_test.go` - Tests reward validation, route registration, idempotency, normalization, and fee ledger entries.
+- `stats_test.go` - Tests stats endpoint validation.
+- `todays_test.go` - Tests today's stock endpoint validation.
+
 ---
 
 ## Code Structure
 
-- `/cmd/stocky-api/main.go` — Entry point of the application.
-- `/cmd/reset-migrations.go` — Utility to reset database migrations.
-- `/cmd/seed/` — Database seeding utilities.
-- `/internal/handlers/stocky/` — API route definitions and handlers.
-  - `routes.go` — Route configuration and middleware.
-  - `reward_handler.go` — Reward creation endpoints.
-  - `reward_test.go` — Tests for reward creation and fee calculation.
-  - `adjustment_handler.go` — Adjustment/reversal endpoints.
-  - `adjustment_test.go` — Tests for manual corrections and reversals.
-  - `portfolio_handler.go` — Portfolio retrieval endpoints.
-  - `portfolio_test.go` — Tests for portfolio aggregation.
-  - `today_handler.go` — Today's stocks endpoints.
-  - `todays_test.go` — Tests for today's stock rewards.
-  - `historical_handler.go` — Historical data endpoints.
-  - `historical_test.go` — Tests for historical INR valuation.
-  - `stats_handler.go` — Statistics endpoints.
-  - `stats_test.go` — Tests for overall statistics.
-- `/internal/storage/models/` — Database models and data structures.
-- `/internal/config/` — Configuration management.
-- `/internal/utils/response/` — Standardized HTTP response utilities.
-  - `response.go` — Response formatting functions (WriteJson, ErrorResponse, etc.).
-- `/internal/utils/` — Utility functions (rounding, JSON helpers).
-- `/internal/jobs/` — Background jobs (price updater worker).
-- `/internal/database/migrations/` — SQL migrations for tables and schema.
-- `Dockerfile` — Docker image instructions
-- `docker-compose.yml` — Docker Compose setup
-- `Stocky-api.postman_collection.json` — Postman collection for API testing.
+- `/cmd/stocky-api/main.go` - API entry point.
+- `/cmd/reset-migrations.go` - Migration reset utility.
+- `/internal/config/` - Environment configuration.
+- `/internal/database/migrations/` - SQL migrations and views.
+- `/internal/handlers/stocky/` - HTTP handlers, route setup, and tests.
+- `/internal/jobs/` - Background price updater.
+- `/internal/storage/models/` - Data models.
+- `/internal/utils/` - Rounding and JSON helpers.
+- `/internal/utils/response/` - JSON response helpers.
+- `Dockerfile` - Docker image instructions.
+- `docker-compose.yml` - Docker Compose setup.
+- `Stocky-api.postman_collection.json` - Postman collection.
 
 ---
 
-    depends_on:
-      - db
+## Price Update System
 
-volumes:
-db-data:
+The current price updater is a simulated updater for local development and testing. It does not call a real external market-data API.
 
-```
+Current behavior:
 
-# Start services:
+1. Reads symbols and prices from `stock_prices`.
+2. Uses `RandomPriceFetcher` to generate a new price from the last stored price.
+3. Sometimes simulates a fetch failure and returns a dampened fallback price.
+4. Updates `stock_prices`.
+5. Inserts or updates the current day's row in `stock_price_history`.
+6. Stores recently updated prices in an in-memory `PriceCache`.
 
-```
+Reliability features:
 
-docker-compose up -d
+- Worker pool for concurrent symbol processing.
+- Buffered-channel semaphore to limit concurrent database writes.
+- Retry logic for database updates and history inserts.
+- Panic recovery in update cycles and workers.
+- Context-aware shutdown.
 
-````
+---
+
+## Edge Cases Handled
+
+- **Duplicate rewards** - Prevented with same-day uniqueness and idempotency handling.
+- **Missing idempotency key** - Stored as SQL `NULL`; API scans it back as an empty string when returning inserted rows.
+- **Stock symbol casing** - Reward creation normalizes symbols with trimming and uppercase conversion.
+- **Stock events** - Views account for splits, bonus issues, mergers, and delisting.
+- **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
+- **Negative quantities after adjustment** - Prevented by transactional validation.
+- **Rounding** - Amounts and quantities are rounded consistently.
+- **Transaction safety** - Reward creation and adjustment workflows use transactions.
+
+---
 
 ## Response Format
 
-The API uses a standardized response package for consistent error and success responses across all endpoints.
+Successful responses return JSON with status code `200`.
 
-- **Success responses**: Return JSON with status code 200 and relevant data.
-- **Error responses**: Return JSON with appropriate HTTP status code and error message:
-  ```json
-  {
-    "error": "error message here"
-  }
-````
+Error responses use:
 
-### Response Package Functions:
-
-- `WriteJson()` — Writes JSON responses with proper headers.
-- `ErrorResponse()` — Creates standardized error responses.
-
-## System Resilience & Edge Cases
-
-### Price Update System
-
-The system includes a sophisticated background worker for price synchronization, designed for high performance and reliability:
-
-1.  **Worker Pool Architecture**: Utilizes a configurable pool of concurrent workers to process stock price updates in parallel, maximizing throughput.
-2.  **Concurrency Control (Semaphores)**: Implements a **weighted semaphore** (via buffered channels) to strictly limit concurrent database writes, preventing connection exhaustion and ensuring system stability during mass updates.
-3.  **In-Memory Caching**: A thread-safe `PriceCache` with `RWMutex` provides sub-millisecond access to latest prices, significantly reducing database load for read-heavy operations.
-4.  **Multiple Fallback Layers**:
-    - Primary: External API fetch.
-    - Secondary: Recent in-memory cached prices.
-    - Tertiary: Last known good price from historical records with "dampened" estimation logic.
-5.  **Robustness Features**:
-    - **Exponential Backoff**: Automatic retry logic for database operations.
-    - **Panic Recovery**: Each worker is wrapped in a recovery defer block to prevent a single malformed job from crashing the entire pipeline.
-    - **Context-Aware**: Full support for graceful shutdowns via `context.Context`.
-
-### Resilience Features
-
-- Automatic retries on failure
-- Cache with configurable staleness threshold
-- Graceful degradation of price accuracy
-- Clear logging of fallback usage
-- Transaction safety
-
-### Edge Cases Handled
-
-- **Duplicate rewards** — Prevented via date and user checks with idempotency keys.
-- **Stock events** — Handles splits, mergers, bonus issues, and delisting.
-- **Adjustments/refunds** — Tracked in `adjustments` table with validation.
-- **Rounding errors** — Proper rounding using `RoundAmount()` and `RoundQuantity()` utilities.
-- **Price API downtime** — Robust fallback system with caching and graceful degradation.
-- **Negative quantities** — Prevented through validation before adjustments.
-- **Transaction safety** — All operations use database transactions for data consistency.
-- **Data staleness** — Tracking and handling of stale price data with clear indicators.
+```json
+{
+  "error": "error message here"
+}
+```
 
 ---
 
