@@ -41,9 +41,11 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) lm ON TRUE
 JOIN stock_prices sp ON UPPER(COALESCE(lm.new_symbol, r.stock_symbol)) = UPPER(sp.stock_symbol)
-WHERE r.stock_symbol NOT IN (
-    SELECT stock_symbol
-    FROM stock_events
-    WHERE event_type = 'delist' AND effective_date <= CURRENT_DATE
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM stock_events se_delist
+    WHERE se_delist.event_type = 'delist'
+      AND se_delist.effective_date <= CURRENT_DATE
+      AND UPPER(se_delist.stock_symbol) = UPPER(r.stock_symbol)
 )
 GROUP BY r.user_id, COALESCE(lm.new_symbol, r.stock_symbol), sp.price;

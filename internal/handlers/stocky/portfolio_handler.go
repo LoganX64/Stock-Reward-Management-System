@@ -26,15 +26,17 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 
 	// Query from the view
 	rows, err := h.DB.Query(`
-		SELECT stock_symbol, adjusted_quantity, current_price, inr_value
-		FROM user_portfolio
-		WHERE user_id = $1
-		  AND (stock_symbol NOT IN (
-		      SELECT stock_symbol
-		      FROM stock_events
-		      WHERE event_type = 'delist' AND effective_date <= CURRENT_DATE
-		  ))
-		ORDER BY stock_symbol
+		SELECT p.stock_symbol, p.adjusted_quantity, p.current_price, p.inr_value
+		FROM user_portfolio p
+		WHERE p.user_id = $1
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM stock_events se
+		      WHERE se.event_type = 'delist'
+		        AND se.effective_date <= CURRENT_DATE
+		        AND UPPER(se.stock_symbol) = UPPER(p.stock_symbol)
+		  )
+		ORDER BY p.stock_symbol
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
 
