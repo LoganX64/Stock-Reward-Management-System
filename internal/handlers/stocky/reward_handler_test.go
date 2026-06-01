@@ -129,6 +129,26 @@ func TestCreateReward_ZeroQuantity(t *testing.T) {
 	}
 }
 
+func TestCreateReward_QuantityRoundsToZero(t *testing.T) {
+	router := setupCreateRewardRouter()
+
+	payload := `{
+		"user_id": 1,
+		"stock_symbol": "AAPL",
+		"quantity": 0.0000004
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/reward", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for quantity that rounds to zero, got %d", w.Code)
+	}
+}
+
 func TestCreateReward_NegativeQuantity(t *testing.T) {
 	router := setupCreateRewardRouter()
 

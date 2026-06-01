@@ -68,6 +68,10 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	}
 
 	req.Quantity = utils.RoundQuantity(req.Quantity)
+	if req.Quantity <= 0 {
+		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
