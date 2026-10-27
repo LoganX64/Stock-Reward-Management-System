@@ -3,26 +3,6 @@
 #
 # Binaries for programs and plugins
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
-go.work
-go.work.sum
 
 # env file
 .env
@@ -35,10 +15,3 @@ go.work.sum
 
 database
 !/internal/database/
-
-/config
-.yaml
-system_design.md
-CODE_REVIEW.md
-features.md
-code-review.md
