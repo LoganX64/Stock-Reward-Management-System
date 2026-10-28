@@ -23,6 +23,7 @@ func main() {
 		DROP FUNCTION IF EXISTS reward_action_settlement(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_action_settlements(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS validate_stock_event_fraction() CASCADE;
+		DROP FUNCTION IF EXISTS normalize_stock_event() CASCADE;
 		DROP FUNCTION IF EXISTS instrument_delist_event(TEXT, DATE, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_merger_cash_proceeds(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_quantity_at(INTEGER, DATE) CASCADE;

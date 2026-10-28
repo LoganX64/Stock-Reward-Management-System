@@ -15,12 +15,16 @@
 
 - **Problem:** Corporate actions can change stock quantities, symbols, and portfolio visibility.
 - **Handling:**
-  - `stock_events` tracks splits, bonus issues, mergers, and delisting events with explicit effective dates and ratios.
+  - `stock_events` tracks splits, bonus issues, mergers, and delisting events with normalized symbols, explicit effective dates, and ratios.
   - Prices stay raw in `stock_prices` and `stock_price_history`; `stock_prices_adjusted` and `stock_price_history_adjusted` apply split/bonus factors once at read time so raw values are never scaled twice.
   - A 2:1 split or 1:1 bonus is stored as `2/1`; a 1:5 reverse split is stored as `1/5`.
   - `instrument_lineage` exposes normalized merger edges. A merger chain such as A→B→C is resolved recursively, composing ratios and effective dates.
   - Split/bonus events on B or C apply only while the holding is in that instrument. An event after the holding has moved to the next successor is ignored.
   - Merger events require a distinct successor and positive ratios. A trigger rejects lineage cycles, and each predecessor may have only one merge event.
+  - Corporate-action symbols are trimmed and uppercased before storage. A unique index on normalized symbol, event type, and effective date rejects case, whitespace, and same-day duplicate events.
+  - Ratios are validated: split ratios are positive and not 1:1; bonus ratios are greater than 1:1; merger ratios are positive; delist ratios are normalized to 1:1.
+  - Event-type fields are constrained: split/bonus events cannot carry merger/delist fields; mergers require a non-blank successor and no delist outcome; delists require an outcome and no successor.
+  - There is no corporate-action write API yet; validation is enforced by database constraints and triggers for every write path.
   - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split or post-merger correction is not multiplied by prior events.
   - `user_portfolio` and `today_rewards` use movement-derived current balances, the terminal successor symbol, and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
   - Delist filtering resolves the terminal symbol first. A delist on a predecessor after a merger does not remove the successor holding; a delist on the terminal instrument does.
@@ -39,7 +43,7 @@
   - Corporate-action cash is posted to `ledger` as positive `inr_outflow` rows tagged with `stock_event_id`; the unique key `(reward_id, stock_event_id)` prevents duplicates. A `stock_events` trigger posts immediately, and `CorporateActionService` processes future-dated events at startup and daily.
   - `reward_corporate_action_outcomes` is the shared per-reward outcome view used by `today_rewards` and `user_portfolio`, so `/portfolio` and `/stats` report the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity`. `totalPortfolioValue` remains stock-only.
   - Reconciliation keeps corporate-action cash separate from adjustment cash and compares derived cash with tagged ledger postings through `corporate_action_cash_matches`.
-  - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, and duplicate delists.
+  - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, duplicate delists, blank symbols, non-positive ratios, no-op 1:1 splits, non-forward bonuses, non-1:1 delists, and case/whitespace/same-day duplicate events.
 
 ## 3. Missing Historical Prices
 

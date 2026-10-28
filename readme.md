@@ -108,7 +108,7 @@ The project uses PostgreSQL with the following main tables and views:
 - `ledger`: Stock units, INR outflows, fee entries, and corporate-action cash postings tagged with `stock_event_id`.
 - `stock_prices`: Latest stock prices.
 - `stock_price_history`: Daily stock price history.
-- `stock_events`: Splits, bonus issues, mergers, and delisting events with optional cash consideration, delist outcome, and fraction policy.
+- `stock_events`: Splits, bonus issues, mergers, and delisting events with normalized symbols, optional cash consideration, delist outcome, and fraction policy.
 - `adjustments`: Manual corrections, fee refunds, and reward reversals with effective dates.
 - `instrument_lineage` (VIEW): Normalized merger edges derived from `stock_events`, used to resolve A→B→C chains.
 - `stock_prices_adjusted` (VIEW): Raw latest prices with split/bonus factors applied.
@@ -135,6 +135,9 @@ The project uses PostgreSQL with the following main tables and views:
 - A 2:1 forward split or 1:1 bonus uses ratio `2/1`; a 1:5 reverse split uses `1/5`. Only `split` and `bonus` events affect prices.
 - Merger lineage is resolved recursively. A reward in A follows A→B→C, composing every merger ratio and applying split/bonus events only while the holding is in each successor instrument.
 - Merger events must have a distinct successor and positive ratios. A database trigger rejects lineage cycles, and each predecessor may have only one merge event.
+- Corporate-action symbols are trimmed and uppercased before storage. A unique index on normalized symbol, event type, and effective date rejects case, whitespace, and same-day duplicate events.
+- Event ratios are validated: split ratios must be positive and not 1:1; bonus ratios must be greater than 1:1; merger ratios must be positive; delist ratios are normalized to 1:1. Event-type fields are constrained so split/bonus events cannot carry merger/delist fields, mergers require a non-blank successor and cannot carry a delist outcome, and delists require an outcome and cannot carry a successor.
+- There is no corporate-action write API yet; these rules are enforced by database constraints and triggers for every write path.
 - Delist filtering resolves the terminal successor first. A predecessor delisting after a merger does not remove the valid successor holding; a delisting of the terminal instrument does.
 - A merger can carry optional `cash_per_unit` consideration per predecessor share. The cash is calculated when the holding crosses that merger edge and is included in `cashProceeds`.
 - A terminal delist must specify `delist_outcome`:
