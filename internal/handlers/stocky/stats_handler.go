@@ -64,9 +64,18 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
+	cashProceeds, writtenOffQuantity, err := h.getUserCorporateActionCash(userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":              userID,
 		"todayRewards":        utils.OrEmpty(todayRewards),
 		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
+		"cashProceeds":        utils.RoundAmount(cashProceeds),
+		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),
 	})
 }

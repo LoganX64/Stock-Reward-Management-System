@@ -86,9 +86,15 @@ Portfolio responses use the same pagination metadata:
   "userId": 1,
   "limit": 100,
   "offset": 0,
-  "portfolio": []
+  "portfolio": [],
+  "cashProceeds": 0,
+  "writtenOffQuantity": 0
 }
 ```
+
+`cashProceeds` is the total cash received from merger consideration and cash-exit delistings. `writtenOffQuantity` is the quantity removed by write-off delistings. Both are zero when the user has no terminal corporate-action outcomes.
+
+`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds` and `writtenOffQuantity` totals.
 
 ---
 
@@ -101,13 +107,15 @@ The project uses PostgreSQL with the following main tables and views:
 - `ledger`: Stock units, INR outflows, and fee entries.
 - `stock_prices`: Latest stock prices.
 - `stock_price_history`: Daily stock price history.
-- `stock_events`: Splits, bonus issues, mergers, and delisting events.
+- `stock_events`: Splits, bonus issues, mergers, and delisting events with optional cash consideration and delist outcome.
 - `adjustments`: Manual corrections, fee refunds, and reward reversals with effective dates.
 - `instrument_lineage` (VIEW): Normalized merger edges derived from `stock_events`, used to resolve A→B→C chains.
 - `stock_prices_adjusted` (VIEW): Raw latest prices with split/bonus factors applied.
 - `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
 - `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
 - `reward_current_balances` (VIEW): Movement-derived current quantity per reward.
+- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, cash proceeds, and written-off quantity.
+- `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash and written-off quantity.
 - `today_rewards` (VIEW): Today's reward values.
 - `historical_rewards` (VIEW): Historical reward values.
 - `user_portfolio` (VIEW): Aggregated current portfolio holdings.
@@ -127,6 +135,14 @@ The project uses PostgreSQL with the following main tables and views:
 - Merger lineage is resolved recursively. A reward in A follows A→B→C, composing every merger ratio and applying split/bonus events only while the holding is in each successor instrument.
 - Merger events must have a distinct successor and positive ratios. A database trigger rejects lineage cycles, and each predecessor may have only one merge event.
 - Delist filtering resolves the terminal successor first. A predecessor delisting after a merger does not remove the valid successor holding; a delisting of the terminal instrument does.
+- A merger can carry optional `cash_per_unit` consideration per predecessor share. The cash is calculated when the holding crosses that merger edge and is included in `cashProceeds`.
+- A terminal delist must specify `delist_outcome`:
+  - `cash_exit` requires positive `cash_per_unit`; the holding leaves the portfolio and `quantity × cash_per_unit` is reported as cash proceeds.
+  - `write_off` requires no cash; the holding leaves the portfolio and its quantity is reported as `writtenOffQuantity`.
+- A cash-only acquisition is represented as a `delist` with `cash_exit` and no successor.
+- Legacy delist rows are backfilled to `write_off`, matching the previous portfolio-removal behavior.
+- `fraction_policy` is `retain`: split/merger fractions are retained at 6 decimal places. Cash-in-lieu settlement is deferred to the action-processing phase.
+- `reward_corporate_action_outcomes` is the shared per-reward outcome source for `today_rewards` and `user_portfolio`; `/portfolio` and `/stats` therefore return the same cash and write-off totals. `totalPortfolioValue` remains stock-value-only.
 - `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price.
 - Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
 - `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
@@ -286,7 +302,7 @@ Reliability features:
 - **Duplicate rewards** - Prevented with same-day uniqueness and idempotency handling.
 - **Missing idempotency key** - Stored as SQL `NULL`; API scans it back as an empty string when returning inserted rows.
 - **Stock symbol casing** - Reward creation normalizes symbols with trimming and uppercase conversion.
-- **Stock events** - Views account for splits, bonus issues, mergers, and delisting.
+- **Stock events** - Views account for splits, bonus issues, mergers, and delisting, including merger cash consideration and terminal cash-exit/write-off outcomes.
 - **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
 - **Negative quantities after adjustment** - Prevented by transactional validation.
 - **Rounding** - Amounts and quantities are rounded consistently.

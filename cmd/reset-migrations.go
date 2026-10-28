@@ -15,15 +15,26 @@ func main() {
 	}
 	defer db.Close()
 
-	// Drop all views and lineage functions first
+	// Drop all views and corporate-action functions first
 	dropViews := `
+		DROP FUNCTION IF EXISTS instrument_delist_event(TEXT, DATE, DATE) CASCADE;
+		DROP FUNCTION IF EXISTS reward_merger_cash_proceeds(INTEGER, DATE) CASCADE;
+		DROP FUNCTION IF EXISTS reward_quantity_at(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS instrument_is_delisted(TEXT, DATE, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS instrument_quantity_factor(TEXT, DATE, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS instrument_terminal_symbol(TEXT, DATE, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS instrument_chain(TEXT, DATE, DATE) CASCADE;
+		DROP VIEW IF EXISTS user_corporate_action_cash CASCADE;
+		DROP VIEW IF EXISTS reward_corporate_action_outcomes CASCADE;
 		DROP VIEW IF EXISTS instrument_lineage CASCADE;
 		DROP VIEW IF EXISTS historical_rewards CASCADE;
 		DROP VIEW IF EXISTS today_rewards CASCADE;
+		DROP VIEW IF EXISTS user_portfolio CASCADE;
+		DROP VIEW IF EXISTS reward_current_balances CASCADE;
+		DROP VIEW IF EXISTS reward_quantity_movements CASCADE;
+		DROP VIEW IF EXISTS reward_ledger_reconciliation CASCADE;
+		DROP VIEW IF EXISTS stock_prices_adjusted CASCADE;
+		DROP VIEW IF EXISTS stock_price_history_adjusted CASCADE;
 	`
 	_, err = db.Exec(dropViews)
 	if err != nil {

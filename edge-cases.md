@@ -24,6 +24,15 @@
   - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split or post-merger correction is not multiplied by prior events.
   - `user_portfolio` and `today_rewards` use movement-derived current balances, the terminal successor symbol, and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
   - Delist filtering resolves the terminal symbol first. A delist on a predecessor after a merger does not remove the successor holding; a delist on the terminal instrument does.
+  - A merger may include `cash_per_unit` cash consideration per predecessor share. Cash is calculated when the holding crosses that merger edge and is included in `cashProceeds`.
+  - A terminal delist must set `delist_outcome`:
+    - `cash_exit` requires positive `cash_per_unit`, removes the holding from the portfolio, and reports `quantity × cash_per_unit` as cash proceeds.
+    - `write_off` requires no cash, removes the holding, and reports its quantity as `writtenOffQuantity`.
+  - A cash-only acquisition is a `delist` with `cash_exit` and no successor symbol.
+  - Legacy delist events are backfilled to `write_off`, matching the previous behavior of removing the holding without cash.
+  - `fraction_policy` is `retain`: fractions from reverse splits or merger ratios remain at 6 decimal places. Cash-in-lieu settlement is deferred to action processing.
+  - `reward_corporate_action_outcomes` is the shared per-reward outcome view used by `today_rewards` and `user_portfolio`, so `/portfolio` and `/stats` report the same `cashProceeds` and `writtenOffQuantity`. `totalPortfolioValue` remains stock-only.
+  - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, and duplicate delists.
 
 ## 3. Missing Historical Prices
 
