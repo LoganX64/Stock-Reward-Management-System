@@ -85,9 +85,9 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*FOR UPDATE`).
+	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor"}).AddRow("TCS", 5.0, 1.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 5.0, 1.0, 5.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
 		WithArgs(1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -150,9 +150,9 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*FOR UPDATE`).
+	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor"}).AddRow("TCS", 5.0, 0.5))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 5.0, 0.5, 10.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
 		WithArgs(1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -191,6 +191,45 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for post-split correction, got %d", w.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
+	}
+}
+
+func TestAdjustmentHandler_RejectsNegativeSettledQuantity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 0.6, 1.0, 0.0))
+	mock.ExpectRollback()
+
+	payload := `{
+		"adjustment_type": "manual_correction",
+		"delta_quantity": -1,
+		"reason": "over-reversal"
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/adjustments/1", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative settled quantity, got %d", w.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)

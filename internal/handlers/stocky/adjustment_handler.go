@@ -81,9 +81,12 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		}
 	}()
 
-	// Fetch the reward at its reward-date-equivalent balance and lock it for update.
-	// The requested delta is denominated in units on the adjustment effective date.
-	var currentQty float64
+	// Fetch the reward's normalized (reward-date-equivalent) balance for
+	// storage and its settled current-date balance for validation. Cash-in-lieu
+	// settlement floors the current balance, so a delta large enough to take the
+	// gross quantity negative but not the settled quantity must still be
+	// rejected against the settled balance.
+	var currentQty, settledQty float64
 	var stockSymbol string
 	var normalizationFactor float64
 	err = tx.QueryRowContext(ctx, `
@@ -98,11 +101,15 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				r.stock_symbol,
 				r.created_at::date,
 				CURRENT_DATE
-			) AS normalization_factor
+			) AS normalization_factor,
+			COALESCE((
+				SELECT s.settled_quantity
+				FROM reward_action_settlement(r.id, CURRENT_DATE) s
+			), 0) AS settled_quantity
 		FROM rewards r
 		WHERE r.id = $1
 		FOR UPDATE
-	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor)
+	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor, &settledQty)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward not found"))
@@ -115,7 +122,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 
 	normalizedDelta := req.DeltaQuantity * normalizationFactor
 	newQty := currentQty + normalizedDelta
-	if newQty < 0 {
+	if newQty < 0 || settledQty+req.DeltaQuantity < 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}

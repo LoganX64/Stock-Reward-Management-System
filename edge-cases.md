@@ -30,8 +30,15 @@
     - `write_off` requires no cash, removes the holding, and reports its quantity as `writtenOffQuantity`.
   - A cash-only acquisition is a `delist` with `cash_exit` and no successor symbol.
   - Legacy delist events are backfilled to `write_off`, matching the previous behavior of removing the holding without cash.
-  - `fraction_policy` is `retain`: fractions from reverse splits or merger ratios remain at 6 decimal places. Cash-in-lieu settlement is deferred to action processing.
-  - `reward_corporate_action_outcomes` is the shared per-reward outcome view used by `today_rewards` and `user_portfolio`, so `/portfolio` and `/stats` report the same `cashProceeds` and `writtenOffQuantity`. `totalPortfolioValue` remains stock-only.
+  - Fractional quantities are supported to 6 decimal places and cash to 4 decimal places. `stock_events.fraction_policy` is per event:
+    - `retain` (default) keeps the fractional post-event quantity at 6 decimal places and pays no cash.
+    - `cash_in_lieu` floors the post-event quantity to whole units and pays the removed fraction at the event's positive `fraction_cash_per_unit`, rounded to 4 decimal places. The price is per post-event (successor/current-instrument) share. A reverse split of 3 shares at 1:5 therefore settles at 0 shares plus 0.6 units of cash; a 10-share 42:25 merger settles at 16 successor shares plus 0.8 units of cash.
+  - Fraction settlement is applied per reward lot, not to an aggregated user position. This is a documented limitation of the reward-scoped ledger.
+  - Merger `cash_per_unit` proceeds use the pre-merger quantity and are not reduced by cash-in-lieu flooring. A delist cannot use `cash_in_lieu`; a cash-only exit is a `cash_exit` delist.
+  - Same-date actions are applied in the order split → bonus → merger → adjustment.
+  - Corporate-action cash is posted to `ledger` as positive `inr_outflow` rows tagged with `stock_event_id`; the unique key `(reward_id, stock_event_id)` prevents duplicates. A `stock_events` trigger posts immediately, and `CorporateActionService` processes future-dated events at startup and daily.
+  - `reward_corporate_action_outcomes` is the shared per-reward outcome view used by `today_rewards` and `user_portfolio`, so `/portfolio` and `/stats` report the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity`. `totalPortfolioValue` remains stock-only.
+  - Reconciliation keeps corporate-action cash separate from adjustment cash and compares derived cash with tagged ledger postings through `corporate_action_cash_matches`.
   - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, and duplicate delists.
 
 ## 3. Missing Historical Prices

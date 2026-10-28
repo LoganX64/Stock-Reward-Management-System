@@ -88,13 +88,14 @@ Portfolio responses use the same pagination metadata:
   "offset": 0,
   "portfolio": [],
   "cashProceeds": 0,
+  "cashInLieuProceeds": 0,
   "writtenOffQuantity": 0
 }
 ```
 
-`cashProceeds` is the total cash received from merger consideration and cash-exit delistings. `writtenOffQuantity` is the quantity removed by write-off delistings. Both are zero when the user has no terminal corporate-action outcomes.
+`cashProceeds` is the total cash received from merger consideration, cash-in-lieu fraction settlement, and cash-exit delistings. `cashInLieuProceeds` is the subset produced by fractional-share settlement. `writtenOffQuantity` is the quantity removed by write-off delistings. All three are zero when the user has no terminal corporate-action outcomes.
 
-`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds` and `writtenOffQuantity` totals.
+`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals.
 
 ---
 
@@ -104,18 +105,18 @@ The project uses PostgreSQL with the following main tables and views:
 
 - `users`: User information.
 - `rewards`: Reward events with optional idempotency keys.
-- `ledger`: Stock units, INR outflows, and fee entries.
+- `ledger`: Stock units, INR outflows, fee entries, and corporate-action cash postings tagged with `stock_event_id`.
 - `stock_prices`: Latest stock prices.
 - `stock_price_history`: Daily stock price history.
-- `stock_events`: Splits, bonus issues, mergers, and delisting events with optional cash consideration and delist outcome.
+- `stock_events`: Splits, bonus issues, mergers, and delisting events with optional cash consideration, delist outcome, and fraction policy.
 - `adjustments`: Manual corrections, fee refunds, and reward reversals with effective dates.
 - `instrument_lineage` (VIEW): Normalized merger edges derived from `stock_events`, used to resolve A→B→C chains.
 - `stock_prices_adjusted` (VIEW): Raw latest prices with split/bonus factors applied.
 - `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
 - `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
-- `reward_current_balances` (VIEW): Movement-derived current quantity per reward.
-- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, cash proceeds, and written-off quantity.
-- `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash and written-off quantity.
+- `reward_current_balances` (VIEW): Movement-derived current settled quantity per reward.
+- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity.
+- `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash, cash-in-lieu proceeds, and written-off quantity.
 - `today_rewards` (VIEW): Today's reward values.
 - `historical_rewards` (VIEW): Historical reward values.
 - `user_portfolio` (VIEW): Aggregated current portfolio holdings.
@@ -141,7 +142,20 @@ The project uses PostgreSQL with the following main tables and views:
   - `write_off` requires no cash; the holding leaves the portfolio and its quantity is reported as `writtenOffQuantity`.
 - A cash-only acquisition is represented as a `delist` with `cash_exit` and no successor.
 - Legacy delist rows are backfilled to `write_off`, matching the previous portfolio-removal behavior.
-- `fraction_policy` is `retain`: split/merger fractions are retained at 6 decimal places. Cash-in-lieu settlement is deferred to the action-processing phase.
+- **Fractional shares.** Quantities are stored to 6 decimal places; cash is stored to 4 decimal places. `stock_events.fraction_policy` supports two per-event policies:
+  - `retain` (default): the post-event fractional quantity is retained at 6 decimal places. No cash is paid.
+  - `cash_in_lieu`: after each split, bonus, or merger, the post-event quantity is rounded to 6 decimal places and floored to whole units. The removed fraction is paid at the event's positive `fraction_cash_per_unit`, which is expressed per post-event (successor/current-instrument) share and rounded to 4 decimal places. The holding continues in the successor instrument with the whole-unit quantity.
+
+  For example:
+
+  | Scenario | `retain` | `cash_in_lieu` |
+  |---|---|---|
+  | 3 shares, 1:5 reverse split | 0.6 shares | 0 shares + `0.6 × fraction_cash_per_unit` |
+  | 10 shares, 42:25 merger | 16.8 successor shares | 16 successor shares + `0.8 × fraction_cash_per_unit` |
+
+  Settlement is applied per reward lot, not across an aggregated user position, matching the reward-scoped ledger. Merger `cash_per_unit` consideration is calculated on the pre-merger quantity and is not reduced by cash-in-lieu flooring. A delist cannot use `cash_in_lieu`; use `cash_exit` for a cash-only exit. Same-date actions are applied in the order split → bonus → merger → adjustment.
+- Corporate-action cash is posted physically to `ledger` as positive `inr_outflow` rows tagged with `ledger.stock_event_id`. The unique key `(reward_id, stock_event_id)` makes posting idempotent. An `AFTER` statement trigger on `stock_events` posts immediately, and the background `CorporateActionService` runs at startup and daily to post future-dated events when they become effective. `process_corporate_action_cash(as_of)` updates or removes stale postings when events change.
+- `reward_ledger_reconciliation` excludes corporate-action cash from adjustment-cash reconciliation and compares derived corporate-action cash with the tagged ledger postings through `corporate_action_cash_matches`.
 - `reward_corporate_action_outcomes` is the shared per-reward outcome source for `today_rewards` and `user_portfolio`; `/portfolio` and `/stats` therefore return the same cash and write-off totals. `totalPortfolioValue` remains stock-value-only.
 - `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price.
 - Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
@@ -302,7 +316,7 @@ Reliability features:
 - **Duplicate rewards** - Prevented with same-day uniqueness and idempotency handling.
 - **Missing idempotency key** - Stored as SQL `NULL`; API scans it back as an empty string when returning inserted rows.
 - **Stock symbol casing** - Reward creation normalizes symbols with trimming and uppercase conversion.
-- **Stock events** - Views account for splits, bonus issues, mergers, and delisting, including merger cash consideration and terminal cash-exit/write-off outcomes.
+- **Stock events** - Views account for splits, bonus issues, mergers, and delisting, including merger cash consideration, terminal cash-exit/write-off outcomes, and per-event fractional-share settlement.
 - **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
 - **Negative quantities after adjustment** - Prevented by transactional validation.
 - **Rounding** - Amounts and quantities are rounded consistently.
@@ -319,7 +333,7 @@ WHERE NOT is_reconciled
 ORDER BY reward_id;
 ```
 
-The view compares movement-derived reward quantity to stock-unit postings under the original reward symbol after normalizing both for corporate actions, adjustment amounts to their INR ledger postings, and the original reward cash flow and fees to the stored creation response.
+The view compares movement-derived reward quantity to stock-unit postings under the original reward symbol after normalizing both for corporate actions, adjustment amounts to their INR ledger postings, and the original reward cash flow and fees to the stored creation response. It also compares derived corporate-action cash with tagged `inr_outflow` postings through `corporate_action_cash_matches`; corporate-action cash is excluded from the adjustment-cash comparison.
 
 ---
 

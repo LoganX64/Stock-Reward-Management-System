@@ -64,7 +64,8 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"cash_proceeds",
 			"written_off_quantity",
-		}).AddRow(1000.0, 25.0))
+			"cash_in_lieu_proceeds",
+		}).AddRow(1000.0, 25.0, 250.0))
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)
 	w := httptest.NewRecorder()
@@ -83,6 +84,9 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 	}
 	if body["cashProceeds"] != 1000.0 {
 		t.Errorf("expected cashProceeds 1000, got %v", body["cashProceeds"])
+	}
+	if body["cashInLieuProceeds"] != 250.0 {
+		t.Errorf("expected cashInLieuProceeds 250, got %v", body["cashInLieuProceeds"])
 	}
 	if body["writtenOffQuantity"] != 25.0 {
 		t.Errorf("expected writtenOffQuantity 25, got %v", body["writtenOffQuantity"])

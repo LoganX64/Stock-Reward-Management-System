@@ -64,7 +64,7 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
-	cashProceeds, writtenOffQuantity, err := h.getUserCorporateActionCash(userID)
+	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
@@ -76,6 +76,7 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		"todayRewards":        utils.OrEmpty(todayRewards),
 		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
 		"cashProceeds":        utils.RoundAmount(cashProceeds),
+		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),
 	})
 }

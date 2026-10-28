@@ -67,7 +67,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		return
 	}
 
-	cashProceeds, writtenOffQuantity, err := h.getUserCorporateActionCash(userID)
+	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
@@ -80,6 +80,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"offset":             offset,
 		"portfolio":          utils.OrEmpty(portfolio),
 		"cashProceeds":       utils.RoundAmount(cashProceeds),
+		"cashInLieuProceeds": utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity": utils.RoundQuantity(writtenOffQuantity),
 	})
 }

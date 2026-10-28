@@ -22,9 +22,10 @@ func TestGetUserCorporateActionCash_ReturnsOutcome(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"cash_proceeds",
 			"written_off_quantity",
-		}).AddRow(1250.5, 12.25))
+			"cash_in_lieu_proceeds",
+		}).AddRow(1250.5, 12.25, 250.5))
 
-	cash, writtenOff, err := handler.getUserCorporateActionCash(7)
+	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(7)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,6 +34,9 @@ func TestGetUserCorporateActionCash_ReturnsOutcome(t *testing.T) {
 	}
 	if writtenOff != 12.25 {
 		t.Errorf("expected written-off quantity 12.25, got %v", writtenOff)
+	}
+	if cashInLieu != 250.5 {
+		t.Errorf("expected cash-in-lieu 250.5, got %v", cashInLieu)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -53,11 +57,11 @@ func TestGetUserCorporateActionCash_NoRows(t *testing.T) {
 		WithArgs(8).
 		WillReturnError(sql.ErrNoRows)
 
-	cash, writtenOff, err := handler.getUserCorporateActionCash(8)
+	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(8)
 	if err != nil {
 		t.Fatalf("expected no error for missing outcome row, got %v", err)
 	}
-	if cash != 0 || writtenOff != 0 {
-		t.Errorf("expected zero values for missing outcome row, got %v/%v", cash, writtenOff)
+	if cash != 0 || writtenOff != 0 || cashInLieu != 0 {
+		t.Errorf("expected zero values for missing outcome row, got %v/%v/%v", cash, writtenOff, cashInLieu)
 	}
 }

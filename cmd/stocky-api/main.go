@@ -80,6 +80,16 @@ func main() {
 	}()
 
 	// =======================
+	// Background Corporate Action Job
+	// =======================
+	corporateActionService := jobs.NewCorporateActionService(db)
+	corporateActionDone := make(chan struct{})
+	go func() {
+		defer close(corporateActionDone)
+		corporateActionService.Start(ctx)
+	}()
+
+	// =======================
 	// HTTP Server
 	// =======================
 	r := gin.Default()
@@ -127,6 +137,10 @@ func main() {
 	logrus.Info("Waiting for price service to stop...")
 	<-priceServiceDone
 	logrus.Info("Price service stopped")
+
+	logrus.Info("Waiting for corporate action processor to stop...")
+	<-corporateActionDone
+	logrus.Info("Corporate action processor stopped")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
