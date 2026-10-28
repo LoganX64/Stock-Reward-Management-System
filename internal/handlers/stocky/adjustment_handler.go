@@ -46,6 +46,22 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 
 	req.DeltaQuantity = utils.RoundQuantity(req.DeltaQuantity)
 	req.DeltaAmount = utils.RoundAmount(req.DeltaAmount)
+	if req.DeltaQuantity == 0 && req.DeltaAmount == 0 {
+		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment must change quantity or amount"))
+		return
+	}
+	switch req.AdjustmentType {
+	case models.Reward_Reversal:
+		if req.DeltaQuantity > 0 || req.DeltaAmount < 0 {
+			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward_reversal requires non-positive delta_quantity and non-negative delta_amount"))
+			return
+		}
+	case models.Fee_Refund:
+		if req.DeltaQuantity != 0 || req.DeltaAmount < 0 {
+			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("fee_refund requires zero delta_quantity and non-negative delta_amount"))
+			return
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
