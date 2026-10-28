@@ -3,6 +3,7 @@ package stocky
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math"
 	"net/http"
 	"strings"
@@ -118,6 +119,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 	// Insert reward
 	var reward models.Reward
+	var originalResponse []byte
 	idempotencyParam := sql.NullString{String: req.IdempotencyKey, Valid: req.IdempotencyKey != ""}
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT reward_insert`); err != nil {
 		logger.WithError(err).Error("Failed to create reward insert savepoint")
@@ -125,8 +127,8 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO rewards (user_id, stock_symbol, quantity, idempotency_key, created_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), NOW())
+		INSERT INTO rewards (user_id, stock_symbol, quantity, original_quantity, idempotency_key, created_at)
+		VALUES ($1, $2, $3, $3, NULLIF($4, ''), NOW())
 		RETURNING id, user_id, stock_symbol, quantity, COALESCE(idempotency_key, ''), created_at`,
 		req.UserID,
 		req.StockSymbol,
@@ -151,7 +153,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 
 			if req.IdempotencyKey != "" {
 				err = tx.QueryRowContext(ctx, `
-					SELECT id, user_id, stock_symbol, quantity, COALESCE(idempotency_key, ''), created_at
+					SELECT id, user_id, stock_symbol, original_quantity, COALESCE(idempotency_key, ''), created_at, original_response
 					FROM rewards
 					WHERE idempotency_key = $1
 				`, req.IdempotencyKey).Scan(
@@ -161,6 +163,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 					&reward.Quantity,
 					&reward.IdempotencyKey,
 					&reward.CreatedAt,
+					&originalResponse,
 				)
 				if err != nil && err != sql.ErrNoRows {
 					logger.WithError(err).Error("Failed to fetch existing reward")
@@ -180,11 +183,13 @@ func (h *Handler) CreateReward(c *gin.Context) {
 						return
 					}
 					committed = true
-					response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-						"message":           "Reward already created (idempotent retry)",
-						"rewardId":          reward.ID,
-						"idempotent_replay": true,
-					})
+					var replay interface{}
+					if len(originalResponse) == 0 || json.Unmarshal(originalResponse, &replay) != nil {
+						logger.Error("Stored reward response is invalid")
+						response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+						return
+					}
+					response.WriteJson(c.Writer, http.StatusOK, replay)
 					return
 				}
 			}
@@ -215,6 +220,30 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		brokerage = utils.RoundAmount(shareValue * 0.005)
 		stt = utils.RoundAmount(shareValue * 0.001)
 		gst = utils.RoundAmount((brokerage + stt) * 0.18)
+	}
+
+	responseBody := map[string]interface{}{
+		"message":    "Reward created successfully",
+		"rewardId":   reward.ID,
+		"amount_inr": shareValue,
+		"fees": map[string]interface{}{
+			"brokerage": brokerage,
+			"stt":       stt,
+			"gst":       gst,
+			"total":     totalFees,
+		},
+		"is_reversal": isReversal,
+	}
+	responseJSON, err := json.Marshal(responseBody)
+	if err != nil {
+		logger.WithError(err).Error("Failed to encode reward response")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE rewards SET original_response = $1 WHERE id = $2`, responseJSON, reward.ID); err != nil {
+		logger.WithError(err).Error("Failed to store original reward response")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
 	}
 
 	totalFees := utils.RoundAmount(brokerage + stt + gst)
@@ -278,16 +307,5 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	}
 	committed = true
 
-	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"message":    "Reward created successfully",
-		"rewardId":   reward.ID,
-		"amount_inr": shareValue,
-		"fees": map[string]interface{}{
-			"brokerage": brokerage,
-			"stt":       stt,
-			"gst":       gst,
-			"total":     totalFees,
-		},
-		"is_reversal": isReversal,
-	})
+	response.WriteJson(c.Writer, http.StatusOK, responseBody)
 }
