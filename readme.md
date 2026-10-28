@@ -273,6 +273,19 @@ Reliability features:
 - **Rounding** - Amounts and quantities are rounded consistently.
 - **Transaction safety** - Reward creation and adjustment workflows use transactions.
 
+### Ledger reconciliation
+
+After applying migrations, inspect all reward-level ledger discrepancies with:
+
+```sql
+SELECT *
+FROM reward_ledger_reconciliation
+WHERE NOT is_reconciled
+ORDER BY reward_id;
+```
+
+The view compares mutable reward quantity to stock-unit postings under the original reward symbol, adjustment amounts to their INR ledger postings, and the original reward cash flow and fees to the stored creation response.
+
 ---
 
 ## Response Format
