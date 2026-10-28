@@ -419,7 +419,7 @@ func (s *PriceService) insertHistory(ctx context.Context, symbol string, price f
 	for attempt := 0; attempt < 3; attempt++ {
 		_, lastErr = s.db.ExecContext(ctx, `
 			INSERT INTO stock_price_history (stock_symbol, price, date)
-			VALUES ($1, $2, CURRENT_DATE)
+			VALUES ($1, $2, market_today())
 			ON CONFLICT (stock_symbol, date) DO UPDATE
 			SET price = EXCLUDED.price,
 			    created_at = NOW()

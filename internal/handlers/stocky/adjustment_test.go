@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -100,7 +101,7 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 			"idempotency_key",
 			"effective_date",
 			"created_at",
-		}).AddRow(1, 1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "", "2026-05-28", "2026-05-28T00:00:00Z"))
+		}).AddRow(1, 1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "", "2026-05-28", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC)))
 	mock.ExpectExec("UPDATE rewards").
 		WithArgs(4.0, 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -165,7 +166,7 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 			"idempotency_key",
 			"effective_date",
 			"created_at",
-		}).AddRow(2, 1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "", "2026-05-28", "2026-05-28T00:00:00Z"))
+		}).AddRow(2, 1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "", "2026-05-28", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC)))
 	mock.ExpectExec("UPDATE rewards").
 		WithArgs(6.0, 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))

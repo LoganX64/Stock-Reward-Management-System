@@ -41,10 +41,6 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("asOf must be a date in YYYY-MM-DD format"))
 			return
 		}
-		if rawAsOf > time.Now().UTC().Format("2006-01-02") {
-			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("asOf cannot be in the future"))
-			return
-		}
 		value := parsed.Format("2006-01-02")
 		asOf = &value
 	}
@@ -65,6 +61,20 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	var asOfArg any
 	valuationMode := "grant_date"
 	if asOf != nil {
+		// "Future" is a market-date question, so it must be checked against the
+		// same market clock the views use rather than the application's UTC
+		// date. Doing it inside the snapshot also keeps the check consistent
+		// with every row read for this response.
+		var asOfAllowed bool
+		if err := tx.QueryRow(`SELECT $1::date <= market_today()`, *asOf).Scan(&asOfAllowed); err != nil {
+			logger.WithError(err).Error("Failed to validate asOf")
+			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			return
+		}
+		if !asOfAllowed {
+			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("asOf cannot be in the future"))
+			return
+		}
 		asOfArg = *asOf
 		valuationMode = "as_of"
 	}
@@ -87,7 +97,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			written_off_quantity
 		FROM historical_rewards_as_of($2::date)
 		WHERE user_id = $1
-		  AND reward_date <= COALESCE($2::date, CURRENT_DATE - 1)
+		  AND reward_date <= COALESCE($2::date, market_today() - 1)
 		ORDER BY reward_date DESC, reward_event_id DESC
 		LIMIT $3 OFFSET $4
 	`, userID, asOfArg, limit, offset)
@@ -141,7 +151,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			rec.INRValue = &v
 		}
 		if priceAsOf.Valid {
-			t := priceAsOf.Time
+			t := priceAsOf.Time.UTC()
 			rec.PriceAsOf = &t
 		}
 		if delistEffectiveDate.Valid {
@@ -168,7 +178,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	if asOf != nil {
 		valuationDate = *asOf
 	} else {
-		valuationDate, err = h.getCurrentDate(tx)
+		valuationDate, err = h.getMarketToday(tx)
 		if err != nil {
 			logger.WithError(err).Error("Failed to fetch valuation date")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))

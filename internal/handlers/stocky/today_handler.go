@@ -82,7 +82,7 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			s.INRValue = &v
 		}
 		if priceAsOf.Valid {
-			t := priceAsOf.Time
+			t := priceAsOf.Time.UTC()
 			s.PriceAsOf = &t
 		}
 

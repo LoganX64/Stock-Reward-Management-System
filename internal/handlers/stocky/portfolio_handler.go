@@ -91,7 +91,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 			item.INRValue = &v
 		}
 		if priceAsOf.Valid {
-			t := priceAsOf.Time
+			t := priceAsOf.Time.UTC()
 			item.PriceAsOf = &t
 		}
 		portfolio = append(portfolio, item)

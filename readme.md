@@ -130,15 +130,15 @@ Portfolio responses use the same pagination metadata:
 }
 ```
 
-`totalPortfolioValue` is the full-set stock value and sums only holdings with an available current price. `totalPositions` counts every active holding, including unpriced ones. `valuationDate` is the database date used by the shared reporting views. `/portfolio` and `/stats` read the same `user_portfolio` view inside one read-only `REPEATABLE READ` snapshot, so their totals and position counts describe the same valuation date and MVCC state.
+`totalPortfolioValue` is the full-set stock value and sums only holdings with an available current price. `totalPositions` counts every active holding, including unpriced ones. `valuationDate` is the market (IST) date used by the shared reporting views. `/portfolio` and `/stats` read the same `user_portfolio` view inside one read-only `REPEATABLE READ` snapshot, so their totals and position counts describe the same valuation date and MVCC state.
 
 `cashProceeds` is the total cash received from merger consideration, cash-in-lieu fraction settlement, and cash-exit delistings. `cashInLieuProceeds` is the subset produced by fractional-share settlement. `writtenOffQuantity` is the quantity removed by write-off delistings. All three are zero when the user has no terminal corporate-action outcomes.
 
-A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the price row's last update timestamp.
+A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the price row's last update timestamp normalized to UTC.
 
 `/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`.
 
-Historical rewards use the same explicit-gap rule. In grant-date mode, when `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. With `asOf`, the price is looked up on that date instead. `priceStatus` is `"not_required"` when the effective quantity is zero (for example after a terminal delist or a full reversal); that is a closed position, not a valuation gap. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete set at the same grant-date or `asOf` reference, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp.
+Historical rewards use the same explicit-gap rule. In grant-date mode, when `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. With `asOf`, the price is looked up on that date instead. `priceStatus` is `"not_required"` when the effective quantity is zero (for example after a terminal delist or a full reversal); that is a closed position, not a valuation gap. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete set at the same grant-date or `asOf` reference, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp normalized to UTC. An `asOf` date is validated against `market_today()` inside the same read snapshot, so it cannot be in the future in any server timezone.
 
 `/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, the full-set `totalPositions`, `valuationDate`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals as `/portfolio`. Its reads run in the same read-only snapshot, so `/stats` and `/portfolio` agree on the active symbol set, total value, position count, and valuation date. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
 
@@ -160,7 +160,7 @@ The project uses PostgreSQL with the following main tables and views:
 - `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
 - `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
 - `reward_current_balances` (VIEW): Movement-derived current settled quantity per reward.
-- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity, evaluated at `CURRENT_DATE`.
+- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity, evaluated at `market_today()`.
 - `reward_corporate_action_outcome` (FUNCTION): Parameterized `(reward_id, as_of)` lifecycle/outcome for historical snapshots.
 - `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash, cash-in-lieu proceeds, and written-off quantity.
 - `today_rewards` (VIEW): Today's reward values with explicit current-price status; terminal-delisted rewards are excluded.
@@ -175,6 +175,22 @@ The project uses PostgreSQL with the following main tables and views:
 - `rewards` -> `ledger` (`reward_id`)
 - `rewards` -> `adjustments` (`reward_id`)
 - `stock_events` -> `stock_prices` (`stock_symbol`)
+
+### Business dates and timezones
+
+Stocky is an Indian-equity system, so every business date is a market date in **Asia/Kolkata (IST, UTC+05:30, no daylight saving)**. The timezone is fixed in the database and is not read from the server or connection session:
+
+- `market_timezone()` returns the fixed zone name.
+- `market_date(timestamptz)` returns the IST calendar date of an absolute instant.
+- `market_today()` returns the current IST date and replaces `CURRENT_DATE` in all business logic.
+
+Timestamp and date columns are deliberately typed:
+
+- `rewards.reward_date` is an explicit `DATE` derived from `rewards.created_at` by the `trg_set_reward_date` trigger. Existing reward dates were preserved when the former generated column was converted. Same-day uniqueness and indexes continue to use `reward_date`.
+- `rewards.created_at`, `ledger.created_at`, `adjustments.created_at`, `users.created_at`, `stock_prices.updated_at`, and `stock_price_history.created_at` are `TIMESTAMPTZ`. API output converts them to UTC.
+- `stock_events.effective_date`, `adjustments.effective_date`, and `stock_price_history.date` are `DATE`. Corporate actions become effective at 00:00 IST on their date, and every event type — including delists — uses the same inclusive boundary.
+
+Migration `0022_business_date_timezone_semantics` interprets legacy `TIMESTAMP` values as IST wall-clock time (`AT TIME ZONE 'Asia/Kolkata'`), so existing business dates do not move. The boundary behavior is covered by `internal/database/timezone_integration_test.go`, which runs the migrations against a disposable database under `UTC`, `Asia/Kolkata`, `America/Los_Angeles`, and `Pacific/Kiritimati` when `TEST_DATABASE_URL` is set.
 
 ### Corporate actions and adjustment timing
 
@@ -208,7 +224,7 @@ The project uses PostgreSQL with the following main tables and views:
 - `reward_ledger_reconciliation` excludes corporate-action cash from adjustment-cash reconciliation and compares derived corporate-action cash with the tagged ledger postings through `corporate_action_cash_matches`.
 - `reward_corporate_action_outcomes` is the single successor-aware outcome source for `today_rewards`, `user_portfolio`, and `user_corporate_action_cash`. A terminal delist removes the holding from active reporting; a predecessor delist after a merger does not. Handlers must not add their own delist predicates, so `/portfolio`, `/stats`, and `/today-stocks` cannot drift apart. `/portfolio` and `/stats` therefore return the same cash and write-off totals, total value, position count, and valuation date. `totalPortfolioValue` remains stock-value-only.
 - `reward_corporate_action_outcome(reward_id, as_of)` generalizes the same outcome logic to an arbitrary date for historical snapshots. `historical_rewards_as_of(as_of)` uses it to value each reward at grant date (`as_of IS NULL`) or as of a requested date. Grant-date mode uses the original quantity and the adjusted reward-date price; as-of mode uses effective-dated quantity, terminal symbol, adjustments, delists, and price. A later delist never removes a historical row or changes its grant-date value. Zero-quantity rows use `price_status = 'not_required'` instead of being reported as valuation gaps. Missing prices remain visible with `price_status = 'missing'` and null `price`/`inr_value`.
-- Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
+- Adjustments take effect on `adjustments.effective_date` (defaults to `market_today()`). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
 - `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
 
 ---
@@ -303,6 +319,15 @@ Run all tests:
 ```bash
 go test ./...
 ```
+
+Run the PostgreSQL timezone integration tests (they create and drop a disposable database):
+
+```bash
+TEST_DATABASE_URL='postgres://postgres:password@localhost:5432/postgres?sslmode=disable' \
+  go test ./internal/database -run Integration -v
+```
+
+The integration tests are skipped when `TEST_DATABASE_URL` is not set.
 
 Run only the stocky handler tests:
 

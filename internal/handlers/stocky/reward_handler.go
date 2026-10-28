@@ -120,6 +120,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	// Insert reward
 	var reward models.Reward
 	var originalResponse []byte
+	var rewardCreatedAt time.Time
 	idempotencyParam := sql.NullString{String: req.IdempotencyKey, Valid: req.IdempotencyKey != ""}
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT reward_insert`); err != nil {
 		logger.WithError(err).Error("Failed to create reward insert savepoint")
@@ -140,8 +141,11 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		&reward.Stock_Symbol,
 		&reward.Quantity,
 		&reward.IdempotencyKey,
-		&reward.CreatedAt,
+		&rewardCreatedAt,
 	)
+	if err == nil {
+		reward.CreatedAt = rewardCreatedAt.UTC().Format(time.RFC3339Nano)
+	}
 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
@@ -152,6 +156,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 			}
 
 			if req.IdempotencyKey != "" {
+				var existingCreatedAt time.Time
 				err = tx.QueryRowContext(ctx, `
 					SELECT id, user_id, stock_symbol, original_quantity, COALESCE(idempotency_key, ''), created_at, original_response
 					FROM rewards
@@ -162,9 +167,12 @@ func (h *Handler) CreateReward(c *gin.Context) {
 					&reward.Stock_Symbol,
 					&reward.Quantity,
 					&reward.IdempotencyKey,
-					&reward.CreatedAt,
+					&existingCreatedAt,
 					&originalResponse,
 				)
+				if err == nil {
+					reward.CreatedAt = existingCreatedAt.UTC().Format(time.RFC3339Nano)
+				}
 				if err != nil && err != sql.ErrNoRows {
 					logger.WithError(err).Error("Failed to fetch existing reward")
 					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))

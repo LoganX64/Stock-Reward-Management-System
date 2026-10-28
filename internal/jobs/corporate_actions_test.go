@@ -15,7 +15,7 @@ func TestCorporateActionService_Process(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(CURRENT_DATE)")).
+	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(market_today())")).
 		WillReturnRows(sqlmock.NewRows([]string{"process_corporate_action_cash"}).AddRow(3))
 
 	service := NewCorporateActionService(db)
@@ -33,7 +33,7 @@ func TestCorporateActionService_ProcessErrorDoesNotPanic(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(CURRENT_DATE)")).
+	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(market_today())")).
 		WillReturnError(context.DeadlineExceeded)
 
 	service := NewCorporateActionService(db)

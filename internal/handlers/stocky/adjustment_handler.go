@@ -99,12 +99,12 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 			), 0) AS normalized_quantity,
 			1::numeric / instrument_quantity_factor(
 				r.stock_symbol,
-				r.created_at::date,
-				CURRENT_DATE
+				r.reward_date,
+				market_today()
 			) AS normalization_factor,
 			COALESCE((
 				SELECT s.settled_quantity
-				FROM reward_action_settlement(r.id, CURRENT_DATE) s
+				FROM reward_action_settlement(r.id, market_today()) s
 			), 0) AS settled_quantity
 		FROM rewards r
 		WHERE r.id = $1
@@ -139,9 +139,10 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 
 	// Insert adjustment
 	var inserted models.Adjustment
+	var insertedCreatedAt time.Time
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, idempotency_key, effective_date, created_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), CURRENT_DATE, NOW())
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), market_today(), NOW())
 		RETURNING id, reward_id, adjustment_type, delta_quantity, delta_amount, reason, COALESCE(idempotency_key, ''), effective_date::text, created_at
 	`,
 		rewardID,
@@ -158,8 +159,11 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		&inserted.Reason,
 		&inserted.IdempotencyKey,
 		&inserted.EffectiveDate,
-		&inserted.CreatedAt,
+		&insertedCreatedAt,
 	)
+	if err == nil {
+		inserted.CreatedAt = insertedCreatedAt.UTC().Format(time.RFC3339Nano)
+	}
 	if err != nil {
 		if req.IdempotencyKey != "" {
 			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
@@ -170,6 +174,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				}
 				var existing models.Adjustment
 				var storedResponse []byte
+				var existingCreatedAt time.Time
 				err = tx.QueryRowContext(ctx, `
 					SELECT id, reward_id, adjustment_type, delta_quantity, delta_amount, COALESCE(reason, ''),
 					       COALESCE(idempotency_key, ''), effective_date::text, created_at, original_response
@@ -177,13 +182,14 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				`, req.IdempotencyKey).Scan(
 					&existing.ID, &existing.RewardID, &existing.AdjustmentType,
 					&existing.DeltaQuantity, &existing.DeltaAmount, &existing.Reason,
-					&existing.IdempotencyKey, &existing.EffectiveDate, &existing.CreatedAt, &storedResponse,
+					&existing.IdempotencyKey, &existing.EffectiveDate, &existingCreatedAt, &storedResponse,
 				)
 				if err != nil {
 					logger.WithError(err).Error("Failed to fetch existing adjustment")
 					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 					return
 				}
+				existing.CreatedAt = existingCreatedAt.UTC().Format(time.RFC3339Nano)
 				if existing.RewardID != rewardID || existing.AdjustmentType != req.AdjustmentType ||
 					existing.DeltaQuantity != req.DeltaQuantity || existing.DeltaAmount != req.DeltaAmount || existing.Reason != req.Reason {
 					response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))

@@ -63,9 +63,26 @@ func TestGetHistoricalINR_InvalidAsOf(t *testing.T) {
 }
 
 func TestGetHistoricalINR_RejectsFutureAsOf(t *testing.T) {
-	router := setupHistoricalRouter()
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
 
 	tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT $1::date <= market_today()")).
+		WithArgs(tomorrow).
+		WillReturnRows(sqlmock.NewRows([]string{"allowed"}).AddRow(false))
+	mock.ExpectRollback()
+
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1?asOf="+tomorrow, nil)
 
 	w := httptest.NewRecorder()
@@ -73,6 +90,9 @@ func TestGetHistoricalINR_RejectsFutureAsOf(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for future asOf, got %d", w.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
 	}
 }
 
@@ -108,11 +128,11 @@ func TestGetHistoricalINR_ReturnsMissingHistoricalPrice(t *testing.T) {
 			"cash_proceeds",
 			"written_off_quantity",
 		}).
-			AddRow("2026-10-27", 2, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Now(), "active", true, nil, 0.0, 0.0).
+			AddRow("2026-10-27", 2, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Date(2026, 10, 27, 18, 30, 0, 0, time.FixedZone("IST", 5*3600+1800)), "active", true, nil, 0.0, 0.0).
 			AddRow("2026-10-26", 1, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil, "active", true, nil, 0.0, 0.0))
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT CURRENT_DATE::TEXT")).
-		WillReturnRows(sqlmock.NewRows([]string{"current_date"}).AddRow("2026-10-28"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT market_today()::TEXT")).
+		WillReturnRows(sqlmock.NewRows([]string{"market_today"}).AddRow("2026-10-28"))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND price_status = 'missing'")).
 		WithArgs(1, nil).
@@ -192,6 +212,9 @@ func TestGetHistoricalINR_ReturnsMissingHistoricalPrice(t *testing.T) {
 	if missing["priceAsOf"] != nil {
 		t.Errorf("expected priceAsOf null, got %v", missing["priceAsOf"])
 	}
+	if available["priceAsOf"] != "2026-10-27T13:00:00Z" {
+		t.Errorf("expected priceAsOf normalized to UTC, got %v", available["priceAsOf"])
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)
@@ -214,6 +237,9 @@ func TestGetHistoricalINR_AsOfKeepsDelistedReward(t *testing.T) {
 	asOf := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT $1::date <= market_today()")).
+		WithArgs(asOf).
+		WillReturnRows(sqlmock.NewRows([]string{"allowed"}).AddRow(true))
 	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_as_of")).
 		WithArgs(1, asOf, 100, 0).
 		WillReturnRows(sqlmock.NewRows([]string{

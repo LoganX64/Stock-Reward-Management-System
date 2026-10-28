@@ -6,7 +6,7 @@
 - **Handling:**
   - `idempotency_key` is optional and client-provided.
   - Empty idempotency keys are stored as SQL `NULL`.
-  - Rewards are constrained by `(user_id, stock_symbol, reward_date)` to prevent multiple same-day rewards for the same user and stock.
+  - Rewards are constrained by `(user_id, stock_symbol, reward_date)` to prevent multiple same-day rewards for the same user and stock. “Same day” means the market date in `Asia/Kolkata`, not the database session date.
   - A case-insensitive unique index also protects `(user_id, UPPER(stock_symbol), reward_date)`.
   - If a duplicate insert occurs with a matching `idempotency_key`, the API fetches the existing reward and returns an idempotent replay response.
   - If the same `idempotency_key` is reused with a different payload, the API returns a conflict.
@@ -15,7 +15,7 @@
 
 - **Problem:** Corporate actions can change stock quantities, symbols, and portfolio visibility.
 - **Handling:**
-  - `stock_events` tracks splits, bonus issues, mergers, and delisting events with normalized symbols, explicit effective dates, and ratios.
+  - `stock_events` tracks splits, bonus issues, mergers, and delisting events with normalized symbols, explicit market-date effective dates, and ratios. All event types become effective at 00:00 IST and use the same inclusive date boundary.
   - Prices stay raw in `stock_prices` and `stock_price_history`; `stock_prices_adjusted` and `stock_price_history_adjusted` apply split/bonus factors once at read time so raw values are never scaled twice.
   - A 2:1 split or 1:1 bonus is stored as `2/1`; a 1:5 reverse split is stored as `1/5`.
   - `instrument_lineage` exposes normalized merger edges. A merger chain such as A→B→C is resolved recursively, composing ratios and effective dates.
@@ -70,7 +70,7 @@
   - A reward with no history row remains visible with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`.
   - A zero effective quantity (terminal delist or full reversal) reports `priceStatus: "not_required"` with `inrValue: 0`; it is not counted as a missing-price gap.
   - `/historical-inr` returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's full set at the same grant-date or `asOf` reference so clients can detect incomplete totals.
-  - The background price service inserts or updates a daily history row on every cycle, including when the price is unchanged.
+  - The background price service inserts or updates a daily history row on every cycle, including when the price is unchanged. The row's `date` is the market date in `Asia/Kolkata`.
   - Missing dates can be seeded through `SELECT backfill_price_history('YYYY-MM-DD');`, which inserts missing rows from the latest `stock_prices` values.
   - Real historical prices should be imported from an authoritative source; the backfill function is a local/demo convenience and does not fabricate multiple days automatically.
 
@@ -103,7 +103,20 @@
   - It rejects changes that would make the reward quantity negative.
   - It updates the normalized reward balance and inserts adjustment ledger entries in a single transaction.
 
-## 7. Pagination
+## 7. Business Dates and Timezones
+
+- **Problem:** Timestamp/date comparisons are ambiguous when the database session timezone differs from the market timezone, especially around midnight.
+- **Handling:**
+  - The market timezone is fixed at `Asia/Kolkata` (IST, UTC+05:30, no daylight saving). It is exposed by `market_timezone()` and is not configurable per connection.
+  - `market_today()` is the current IST calendar date and replaces `CURRENT_DATE` in business logic. `market_date(timestamptz)` converts an absolute instant to its IST date.
+  - `rewards.reward_date` is an explicit `DATE` derived from `rewards.created_at` by a trigger. Legacy reward dates were preserved when the former generated column was converted.
+  - `stock_events.effective_date`, `adjustments.effective_date`, and `stock_price_history.date` are market `DATE`s. A split, bonus, merger, or delist on a date is effective for that entire date.
+  - Audit timestamps such as `created_at` and `updated_at` are `TIMESTAMPTZ`. API responses normalize `priceAsOf` and adjustment `created_at` values to UTC.
+  - `/historical-inr?asOf=` rejects dates after `market_today()` inside the same read snapshot, so the application's local timezone cannot change the boundary.
+  - Migration `0022_business_date_timezone_semantics` interprets legacy `TIMESTAMP` values as IST wall-clock time. The down migration cannot restore sub-day precision for event dates, which are already normalized to `DATE`.
+  - `internal/database/timezone_integration_test.go` exercises midnight reward boundaries, same-day uniqueness, split/delist inclusivity, price-history dates, `asOf` valuation, corporate-action cash, UTC timestamp normalization, and the legacy migration path under four session timezones.
+
+## 8. Pagination
 
 - **Problem:** Historical and portfolio endpoints can grow large over time.
 - **Handling:**
@@ -140,4 +153,5 @@ This system handles:
 4. Consistent rounding for quantities and INR values.
 5. Simulated price update failures.
 6. Transactional reward adjustments.
-7. Paginated historical and portfolio reads.
+7. Explicit market-date and timezone semantics for rewards, corporate actions, price history, and historical snapshots.
+8. Paginated historical and portfolio reads.

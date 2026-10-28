@@ -58,7 +58,7 @@ func (s *CorporateActionService) process(ctx context.Context) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT process_corporate_action_cash(CURRENT_DATE)
+		SELECT process_corporate_action_cash(market_today())
 	`)
 	if err != nil {
 		logrus.WithError(err).Error("Corporate action cash processing failed")

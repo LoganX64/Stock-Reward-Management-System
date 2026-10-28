@@ -26,7 +26,7 @@ type dbReader interface {
 }
 
 // beginReadSnapshot starts a read-only repeatable-read transaction. Every read
-// in a reporting response then shares one MVCC snapshot and one CURRENT_DATE,
+// in a reporting response then shares one MVCC snapshot and one market date,
 // which keeps position sets and totals consistent.
 func (h *Handler) beginReadSnapshot(ctx context.Context) (*sql.Tx, error) {
 	return h.DB.BeginTx(ctx, &sql.TxOptions{
@@ -93,7 +93,7 @@ func (h *Handler) getPortfolioTotals(q dbReader, userID int) (float64, int, stri
 		SELECT
 			COALESCE(SUM(inr_value), 0),
 			COUNT(*),
-			CURRENT_DATE::TEXT
+			market_today()::TEXT
 		FROM user_portfolio
 		WHERE user_id = $1
 	`, userID).Scan(&totalPortfolioValue, &totalPositions, &valuationDate)
@@ -103,13 +103,13 @@ func (h *Handler) getPortfolioTotals(q dbReader, userID int) (float64, int, stri
 	return totalPortfolioValue, totalPositions, valuationDate, nil
 }
 
-// getCurrentDate returns the database date used by the reporting views. It is
-// read inside the same snapshot as the rest of the response so a request never
-// mixes two valuation dates.
-func (h *Handler) getCurrentDate(q dbReader) (string, error) {
-	var currentDate string
-	err := q.QueryRow(`SELECT CURRENT_DATE::TEXT`).Scan(&currentDate)
-	return currentDate, err
+// getMarketToday returns the market (IST) date used by the reporting views. It
+// is read inside the same snapshot as the rest of the response so a request
+// never mixes two valuation dates.
+func (h *Handler) getMarketToday(q dbReader) (string, error) {
+	var marketToday string
+	err := q.QueryRow(`SELECT market_today()::TEXT`).Scan(&marketToday)
+	return marketToday, err
 }
 
 // getUnpricedHistoricalRewards counts historical reward rows that have no
@@ -127,7 +127,7 @@ func (h *Handler) getUnpricedHistoricalRewards(q dbReader, userID int, asOf *str
 		SELECT stock_symbol
 		FROM historical_rewards_as_of($2::date)
 		WHERE user_id = $1
-		  AND reward_date <= COALESCE($2::date, CURRENT_DATE - 1)
+		  AND reward_date <= COALESCE($2::date, market_today() - 1)
 		  AND price_status = 'missing'
 		ORDER BY stock_symbol
 	`, userID, asOfArg)

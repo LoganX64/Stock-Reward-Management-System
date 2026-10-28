@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -219,7 +220,7 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 			"quantity",
 			"idempotency_key",
 			"created_at",
-		}).AddRow(1, 1, "TCS", 2.0, "case-test", "2026-05-28T00:00:00Z"))
+		}).AddRow(1, 1, "TCS", 2.0, "case-test", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC)))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE rewards SET original_response = $1 WHERE id = $2")).
 		WithArgs(sqlmock.AnyArg(), 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -301,7 +302,7 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 			"idempotency_key",
 			"created_at",
 			"original_response",
-		}).AddRow(1, 1, "TCS", 2.0, "retry-key", "2026-05-28T00:00:00Z", []byte(`{"message":"Reward created successfully","rewardId":1,"amount_inr":200,"fees":{},"is_reversal":false}`)))
+		}).AddRow(1, 1, "TCS", 2.0, "retry-key", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC), []byte(`{"message":"Reward created successfully","rewardId":1,"amount_inr":200,"fees":{},"is_reversal":false}`)))
 	mock.ExpectCommit()
 
 	payload := `{
