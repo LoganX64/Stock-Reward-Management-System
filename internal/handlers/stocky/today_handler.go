@@ -1,6 +1,7 @@
 package stocky
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -27,7 +28,9 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			adjusted_quantity,
 			current_price,
 			total_adjustment_amount,
-			inr_value
+			inr_value,
+			price_status,
+			price_as_of
 		FROM today_rewards
 		WHERE user_id = $1
 		ORDER BY stock_symbol, reward_event_id
@@ -41,26 +44,47 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 	defer rows.Close()
 
 	var stocks []models.TodayStock
+	unpricedRewards := 0
+	unpricedSymbols := []string{}
 	for rows.Next() {
 		var s models.TodayStock
+		var currentPrice sql.NullFloat64
+		var inrValue sql.NullFloat64
+		var priceAsOf sql.NullTime
 		if err := rows.Scan(
 			&s.RewardID,
 			&s.StockSymbol,
 			&s.AdjustedQuantity,
-			&s.CurrentPrice,
+			&currentPrice,
 			&s.TotalAdjustmentAmount,
-			&s.INRValue,
+			&inrValue,
+			&s.PriceStatus,
+			&priceAsOf,
 		); err != nil {
 			logger.WithError(err).Error("scan error")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
 		}
 
-		// Apply consistent rounding
+		// Apply consistent rounding to available values and preserve NULL for
+		// missing prices.
 		s.AdjustedQuantity = utils.RoundQuantity(s.AdjustedQuantity)
-		s.CurrentPrice = utils.RoundAmount(s.CurrentPrice)
 		s.TotalAdjustmentAmount = utils.RoundAmount(s.TotalAdjustmentAmount)
-		s.INRValue = utils.RoundAmount(s.INRValue)
+		if currentPrice.Valid {
+			v := utils.RoundAmount(currentPrice.Float64)
+			s.CurrentPrice = &v
+		} else {
+			unpricedRewards++
+			unpricedSymbols = append(unpricedSymbols, s.StockSymbol)
+		}
+		if inrValue.Valid {
+			v := utils.RoundAmount(inrValue.Float64)
+			s.INRValue = &v
+		}
+		if priceAsOf.Valid {
+			t := priceAsOf.Time
+			s.PriceAsOf = &t
+		}
 
 		stocks = append(stocks, s)
 	}
@@ -71,7 +95,10 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 	}
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"userId": userID,
-		"stocks": utils.OrEmpty(stocks),
+		"userId":            userID,
+		"stocks":            utils.OrEmpty(stocks),
+		"valuationComplete": unpricedRewards == 0,
+		"unpricedRewards":   unpricedRewards,
+		"unpricedSymbols":   utils.OrEmpty(unpricedSymbols),
 	})
 }

@@ -45,7 +45,21 @@
   - Reconciliation keeps corporate-action cash separate from adjustment cash and compares derived cash with tagged ledger postings through `corporate_action_cash_matches`.
   - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, duplicate delists, blank symbols, non-positive ratios, no-op 1:1 splits, non-forward bonuses, non-1:1 delists, and case/whitespace/same-day duplicate events.
 
-## 3. Missing Historical Prices
+## 3. Missing Current and Historical Prices
+
+### Current prices
+
+- **Problem:** A reward or holding can lose its current price when `stock_prices` has no row for its terminal symbol, for example after a merger into a newly listed successor.
+- **Handling:**
+  - `today_rewards` and `user_portfolio` use a `LEFT JOIN` to `stock_prices_adjusted`.
+  - An unpriced reward or holding remains visible with `price_status = 'missing'`, a null `current_price`, and a null `inr_value`.
+  - The views expose `price_as_of` from `stock_prices.updated_at` for priced rows.
+  - `/today-stocks` returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols`.
+  - `/portfolio` and `/stats` return `valuationComplete`, `unpricedPositions`, and `unpricedSymbols`.
+  - `totalPortfolioValue` in `/stats` sums only priced holdings. Clients must check `valuationComplete` before treating it as a complete value.
+  - Staleness classification is not part of this behavior; `price_as_of` is returned so clients can evaluate freshness.
+
+### Historical prices
 
 - **Problem:** Historical INR values depend on `stock_price_history`.
 - **Handling:**

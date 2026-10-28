@@ -59,6 +59,10 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(10000.0))
 
+	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}))
+
 	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -90,6 +94,84 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 	}
 	if body["writtenOffQuantity"] != 25.0 {
 		t.Errorf("expected writtenOffQuantity 25, got %v", body["writtenOffQuantity"])
+	}
+	if body["valuationComplete"] != true {
+		t.Errorf("expected valuationComplete true, got %v", body["valuationComplete"])
+	}
+	if body["unpricedPositions"] != 0.0 {
+		t.Errorf("expected unpricedPositions 0, got %v", body["unpricedPositions"])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
+	}
+}
+
+func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"stock_symbol",
+			"adjusted_quantity",
+		}).AddRow("NEWCO", 10.0))
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM user_portfolio")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(5000.0))
+
+	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}).AddRow("NEWCO"))
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"cash_proceeds",
+			"written_off_quantity",
+			"cash_in_lieu_proceeds",
+		}).AddRow(0.0, 0.0, 0.0))
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for stats request, got %d", w.Code)
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body["totalPortfolioValue"] != 5000.0 {
+		t.Errorf("expected priced-only totalPortfolioValue 5000, got %v", body["totalPortfolioValue"])
+	}
+	if body["valuationComplete"] != false {
+		t.Errorf("expected valuationComplete false, got %v", body["valuationComplete"])
+	}
+	if body["unpricedPositions"] != 1.0 {
+		t.Errorf("expected unpricedPositions 1, got %v", body["unpricedPositions"])
+	}
+	symbols, ok := body["unpricedSymbols"].([]interface{})
+	if !ok || len(symbols) != 1 || symbols[0] != "NEWCO" {
+		t.Errorf("expected unpricedSymbols [NEWCO], got %v", body["unpricedSymbols"])
+	}
+
+	rewards, ok := body["todayRewards"].([]interface{})
+	if !ok || len(rewards) != 1 {
+		t.Fatalf("expected missing-price reward to remain in todayRewards, got %v", body["todayRewards"])
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

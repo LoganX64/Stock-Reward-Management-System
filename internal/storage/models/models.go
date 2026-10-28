@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type User struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
@@ -86,19 +88,23 @@ type TodayReward struct {
 }
 
 type PortfolioItem struct {
-	StockSymbol  string  `json:"stockSymbol"`
-	Quantity     float64 `json:"quantity"`
-	CurrentPrice float64 `json:"currentPrice"`
-	INRValue     float64 `json:"inrValue"`
+	StockSymbol  string     `json:"stockSymbol"`
+	Quantity     float64    `json:"quantity"`
+	CurrentPrice *float64   `json:"currentPrice"`
+	INRValue     *float64   `json:"inrValue"`
+	PriceStatus  string     `json:"priceStatus"`
+	PriceAsOf    *time.Time `json:"priceAsOf"`
 }
 
 type TodayStock struct {
-	RewardID              int64   `json:"rewardId"`
-	StockSymbol           string  `json:"stockSymbol"`
-	AdjustedQuantity      float64 `json:"adjustedQuantity"`
-	CurrentPrice          float64 `json:"currentPrice"`
-	TotalAdjustmentAmount float64 `json:"totalAdjustmentAmount"`
-	INRValue              float64 `json:"inrValue"`
+	RewardID              int64      `json:"rewardId"`
+	StockSymbol           string     `json:"stockSymbol"`
+	AdjustedQuantity      float64    `json:"adjustedQuantity"`
+	CurrentPrice          *float64   `json:"currentPrice"`
+	TotalAdjustmentAmount float64    `json:"totalAdjustmentAmount"`
+	INRValue              *float64   `json:"inrValue"`
+	PriceStatus           string     `json:"priceStatus"`
+	PriceAsOf             *time.Time `json:"priceAsOf"`
 }
 
 type CreateRewardRequest struct {

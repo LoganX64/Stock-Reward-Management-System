@@ -30,3 +30,33 @@ func (h *Handler) getUserCorporateActionCash(userID int) (float64, float64, floa
 	}
 	return cashProceeds, writtenOffQuantity, cashInLieuProceeds, err
 }
+
+// getUnpricedPortfolioSymbols returns the symbols in the user's active
+// portfolio that have no current price. A holding with a missing price is still
+// returned by user_portfolio, but its current_price and inr_value are NULL.
+func (h *Handler) getUnpricedPortfolioSymbols(userID int) ([]string, error) {
+	rows, err := h.DB.Query(`
+		SELECT stock_symbol
+		FROM user_portfolio
+		WHERE user_id = $1
+		  AND current_price IS NULL
+		ORDER BY stock_symbol
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	symbols := []string{}
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, symbol)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return symbols, nil
+}

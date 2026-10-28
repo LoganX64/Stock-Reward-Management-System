@@ -64,6 +64,13 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
+	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
 	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
@@ -75,6 +82,9 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		"userId":              userID,
 		"todayRewards":        utils.OrEmpty(todayRewards),
 		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
+		"valuationComplete":   len(unpricedSymbols) == 0,
+		"unpricedPositions":   len(unpricedSymbols),
+		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
 		"cashProceeds":        utils.RoundAmount(cashProceeds),
 		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),

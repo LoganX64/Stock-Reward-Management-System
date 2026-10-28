@@ -1,6 +1,7 @@
 package stocky
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -24,10 +25,17 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	// Query from the shared outcome-aware view. Delist filtering is applied
-	// inside user_portfolio so /portfolio and /stats cannot diverge.
+	// Query from the shared outcome-aware view. Delist filtering and missing
+	// price handling are applied inside user_portfolio so /portfolio and /stats
+	// cannot diverge.
 	rows, err := h.DB.Query(`
-		SELECT p.stock_symbol, p.adjusted_quantity, p.current_price, p.inr_value
+		SELECT
+			p.stock_symbol,
+			p.adjusted_quantity,
+			p.current_price,
+			p.inr_value,
+			p.price_status,
+			p.price_as_of
 		FROM user_portfolio p
 		WHERE p.user_id = $1
 		ORDER BY p.stock_symbol
@@ -45,24 +53,47 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	for rows.Next() {
 
 		var item models.PortfolioItem
+		var currentPrice sql.NullFloat64
+		var inrValue sql.NullFloat64
+		var priceAsOf sql.NullTime
 		if err := rows.Scan(
 			&item.StockSymbol,
 			&item.Quantity,
-			&item.CurrentPrice,
-			&item.INRValue); err != nil {
+			&currentPrice,
+			&inrValue,
+			&item.PriceStatus,
+			&priceAsOf); err != nil {
 			logger.WithError(err).Error("Failed to scan portfolio data for user ")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 			return
 		}
 
-		// Apply rounding
+		// Apply rounding to available values and preserve NULL for missing
+		// prices.
 		item.Quantity = utils.RoundQuantity(item.Quantity)
-		item.CurrentPrice = utils.RoundAmount(item.CurrentPrice)
-		item.INRValue = utils.RoundAmount(item.INRValue)
+		if currentPrice.Valid {
+			v := utils.RoundAmount(currentPrice.Float64)
+			item.CurrentPrice = &v
+		}
+		if inrValue.Valid {
+			v := utils.RoundAmount(inrValue.Float64)
+			item.INRValue = &v
+		}
+		if priceAsOf.Valid {
+			t := priceAsOf.Time
+			item.PriceAsOf = &t
+		}
 		portfolio = append(portfolio, item)
 	}
 	if err := rows.Err(); err != nil {
 		logger.WithError(err).Error("Error iterating portfolio rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
+
+	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
@@ -79,6 +110,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"limit":              limit,
 		"offset":             offset,
 		"portfolio":          utils.OrEmpty(portfolio),
+		"valuationComplete":  len(unpricedSymbols) == 0,
+		"unpricedPositions":  len(unpricedSymbols),
+		"unpricedSymbols":    utils.OrEmpty(unpricedSymbols),
 		"cashProceeds":       utils.RoundAmount(cashProceeds),
 		"cashInLieuProceeds": utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity": utils.RoundQuantity(writtenOffQuantity),

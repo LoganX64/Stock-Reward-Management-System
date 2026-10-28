@@ -26,6 +26,7 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 - Track adjustments and refunds for previous rewards.
 - Maintain ledger entries for stock units, cash flows, and fees.
 - Calculate current portfolio and historical INR values.
+- Keep unpriced holdings visible with explicit missing-price status instead of silently dropping them.
 - Support stock splits, bonus issues, mergers, and delisting.
 - Adjust split/bonus prices and quantities exactly once while preserving raw prices.
 - Apply effective-dated quantity movements so post-split corrections are not scaled twice.
@@ -87,6 +88,9 @@ Portfolio responses use the same pagination metadata:
   "limit": 100,
   "offset": 0,
   "portfolio": [],
+  "valuationComplete": true,
+  "unpricedPositions": 0,
+  "unpricedSymbols": [],
   "cashProceeds": 0,
   "cashInLieuProceeds": 0,
   "writtenOffQuantity": 0
@@ -95,7 +99,11 @@ Portfolio responses use the same pagination metadata:
 
 `cashProceeds` is the total cash received from merger consideration, cash-in-lieu fraction settlement, and cash-exit delistings. `cashInLieuProceeds` is the subset produced by fractional-share settlement. `writtenOffQuantity` is the quantity removed by write-off delistings. All three are zero when the user has no terminal corporate-action outcomes.
 
-`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals.
+A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the price row's last update timestamp.
+
+`/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`.
+
+`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
 
 ---
 
@@ -117,9 +125,9 @@ The project uses PostgreSQL with the following main tables and views:
 - `reward_current_balances` (VIEW): Movement-derived current settled quantity per reward.
 - `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity.
 - `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash, cash-in-lieu proceeds, and written-off quantity.
-- `today_rewards` (VIEW): Today's reward values.
+- `today_rewards` (VIEW): Today's reward values with explicit current-price status.
 - `historical_rewards` (VIEW): Historical reward values.
-- `user_portfolio` (VIEW): Aggregated current portfolio holdings.
+- `user_portfolio` (VIEW): Aggregated current portfolio holdings, including holdings whose current price is missing.
 - `reward_ledger_reconciliation` (VIEW): Per-reward stock, cash, adjustment, and fee reconciliation.
 
 ### Key Relationships
@@ -267,10 +275,10 @@ Test files in `internal/handlers/stocky/`:
 
 - `adjustment_test.go` - Tests adjustment validation and reversal ledger behavior.
 - `historical_test.go` - Tests historical endpoint validation.
-- `portfolio_test.go` - Tests portfolio endpoint validation.
+- `portfolio_test.go` - Tests portfolio endpoint validation, cash outcomes, and missing-price holdings.
 - `reward_handler_test.go` - Tests reward validation, route registration, idempotency, normalization, and fee ledger entries.
-- `stats_test.go` - Tests stats endpoint validation.
-- `todays_test.go` - Tests today's stock endpoint validation.
+- `stats_test.go` - Tests stats endpoint validation and incomplete-valuation reporting.
+- `todays_test.go` - Tests today's stock endpoint validation and missing-price rewards.
 
 ---
 
@@ -323,6 +331,7 @@ Reliability features:
 - **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
 - **Negative quantities after adjustment** - Prevented by transactional validation.
 - **Rounding** - Amounts and quantities are rounded consistently.
+- **Missing current prices** - `today_rewards` and `user_portfolio` use a left join to adjusted current prices. Unpriced rewards/holdings remain visible with `priceStatus: "missing"` and null price/value; `/portfolio` and `/stats` return `valuationComplete`, an unpriced count, and `unpricedSymbols`. `totalPortfolioValue` is priced-holdings-only.
 - **Transaction safety** - Reward creation and adjustment workflows use transactions.
 
 ### Ledger reconciliation
