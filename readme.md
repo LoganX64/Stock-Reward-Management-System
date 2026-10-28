@@ -330,14 +330,21 @@ Run all tests:
 go test ./...
 ```
 
-Run the PostgreSQL timezone integration tests (they create and drop a disposable database):
+Run the PostgreSQL integration tests (they create and drop a disposable database per top-level test):
 
 ```bash
 TEST_DATABASE_URL='postgres://postgres:password@localhost:5432/postgres?sslmode=disable' \
   go test ./internal/database -run Integration -v
 ```
 
-The integration tests are skipped when `TEST_DATABASE_URL` is not set.
+The integration tests are skipped when `TEST_DATABASE_URL` is not set. They cover:
+
+- clean and repeated schema migrations, required views/functions/indexes;
+- unique and idempotency conflicts on the reward and adjustment write paths;
+- concurrent keyed rewards, unkeyed same-day rewards, adjustment retries, and overdraft adjustments, asserting that each logical operation commits exactly one effect;
+- reward replay after a later adjustment and ledger reconciliation;
+- split, bonus, reverse-split, merger-chain, delist, and cash-in-lieu valuation semantics;
+- explicit `missing` price status for current and historical valuations.
 
 Run only the stocky handler tests:
 

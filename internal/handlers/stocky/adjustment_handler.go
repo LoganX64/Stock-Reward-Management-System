@@ -81,41 +81,52 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		}
 	}()
 
-	// Fetch the reward's normalized (reward-date-equivalent) balance for
-	// storage and its settled current-date balance for validation. Cash-in-lieu
-	// settlement floors the current balance, so a delta large enough to take the
-	// gross quantity negative but not the settled quantity must still be
-	// rejected against the settled balance.
-	var currentQty, settledQty float64
+	// Lock the reward and read the balance that the previous committed
+	// adjustment left behind. The quantity is maintained in reward-date units,
+	// which is what a new adjustment delta must be normalized against.
+	//
+	// Do not compute this balance through reward_quantity_movements inside the
+	// locking statement: under READ COMMITTED a waiting SELECT FOR UPDATE can
+	// return the updated row while its subquery still uses the transaction's
+	// older statement snapshot. That would let two concurrent adjustments both
+	// calculate from the same starting quantity and lose one update.
+	var currentQty float64
 	var stockSymbol string
 	var normalizationFactor float64
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 			r.stock_symbol,
-			COALESCE((
-				SELECT SUM(m.normalized_quantity_delta)
-				FROM reward_quantity_movements m
-				WHERE m.reward_id = r.id
-			), 0) AS normalized_quantity,
+			r.quantity,
 			1::numeric / instrument_quantity_factor(
 				r.stock_symbol,
 				r.reward_date,
 				market_today()
-			) AS normalization_factor,
-			COALESCE((
-				SELECT s.settled_quantity
-				FROM reward_action_settlement(r.id, market_today()) s
-			), 0) AS settled_quantity
+			) AS normalization_factor
 		FROM rewards r
 		WHERE r.id = $1
 		FOR UPDATE
-	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor, &settledQty)
+	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward not found"))
 			return
 		}
 		logger.WithError(err).Error("Failed to fetch reward")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
+	// Read the settled current-date balance in a separate statement so it sees
+	// every adjustment committed before the row lock was acquired. Cash-in-lieu
+	// settlement floors the current balance, so a delta large enough to take the
+	// gross quantity negative but not the settled quantity must still be
+	// rejected against the settled balance.
+	var settledQty float64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(s.settled_quantity, 0)
+		FROM reward_action_settlement($1, market_today()) s
+	`, rewardID).Scan(&settledQty); err != nil {
+		logger.WithError(err).Error("Failed to fetch settled reward quantity")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}

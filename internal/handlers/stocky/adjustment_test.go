@@ -86,9 +86,12 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 5.0, 1.0, 5.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 5.0, 1.0))
+	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(5.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
 		WithArgs(1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -151,9 +154,12 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 5.0, 0.5, 10.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 5.0, 0.5))
+	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(10.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
 		WithArgs(1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -212,9 +218,12 @@ func TestAdjustmentHandler_RejectsNegativeSettledQuantity(t *testing.T) {
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*settled_quantity.*FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor", "settled_quantity"}).AddRow("TCS", 0.6, 1.0, 0.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 0.6, 1.0))
+	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(0.0))
 	mock.ExpectRollback()
 
 	payload := `{
