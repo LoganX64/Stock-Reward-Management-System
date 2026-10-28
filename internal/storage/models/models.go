@@ -61,6 +61,7 @@ const (
 type Adjustment struct {
 	ID             int     `json:"id"`
 	RewardID       int     `json:"reward_id"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty"`
 	AdjustmentType string  `json:"adjustment_type"`
 	DeltaQuantity  float64 `json:"delta_quantity"`
 	DeltaAmount    float64 `json:"delta_amount"`

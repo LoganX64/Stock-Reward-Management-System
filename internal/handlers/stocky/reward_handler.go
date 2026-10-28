@@ -221,6 +221,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		stt = utils.RoundAmount(shareValue * 0.001)
 		gst = utils.RoundAmount((brokerage + stt) * 0.18)
 	}
+	totalFees := utils.RoundAmount(brokerage + stt + gst)
 
 	responseBody := map[string]interface{}{
 		"message":    "Reward created successfully",
@@ -245,8 +246,6 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
-	totalFees := utils.RoundAmount(brokerage + stt + gst)
 
 	// Prepare ledger entries
 	ledgerEntries := []models.Ledger{

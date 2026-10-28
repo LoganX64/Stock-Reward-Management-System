@@ -3,6 +3,7 @@ package stocky
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
 
@@ -87,27 +89,83 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 
+	// Keep the insert in a savepoint so a concurrent duplicate key can be
+	// resolved and replayed without aborting the surrounding transaction.
+	if req.IdempotencyKey != "" {
+		if _, err := tx.ExecContext(ctx, `SAVEPOINT adjustment_insert`); err != nil {
+			logger.WithError(err).Error("Failed to create adjustment insert savepoint")
+			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			return
+		}
+	}
+
 	// Insert adjustment
 	var inserted models.Adjustment
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, created_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
-		RETURNING id, reward_id, adjustment_type, delta_quantity, delta_amount, reason, created_at
+		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, idempotency_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NOW())
+		RETURNING id, reward_id, adjustment_type, delta_quantity, delta_amount, reason, COALESCE(idempotency_key, ''), created_at
 	`,
 		rewardID,
 		req.AdjustmentType,
 		req.DeltaQuantity,
 		req.DeltaAmount,
-		req.Reason).Scan(
+		req.Reason,
+		req.IdempotencyKey).Scan(
 		&inserted.ID,
 		&inserted.RewardID,
 		&inserted.AdjustmentType,
 		&inserted.DeltaQuantity,
 		&inserted.DeltaAmount,
 		&inserted.Reason,
+		&inserted.IdempotencyKey,
 		&inserted.CreatedAt,
 	)
 	if err != nil {
+		if req.IdempotencyKey != "" {
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+				if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT adjustment_insert`); rollbackErr != nil {
+					logger.WithError(rollbackErr).Error("Failed to roll back adjustment insert savepoint")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				var existing models.Adjustment
+				var storedResponse []byte
+				err = tx.QueryRowContext(ctx, `
+					SELECT id, reward_id, adjustment_type, delta_quantity, delta_amount, COALESCE(reason, ''),
+					       COALESCE(idempotency_key, ''), created_at, original_response
+					FROM adjustments WHERE idempotency_key = $1
+				`, req.IdempotencyKey).Scan(
+					&existing.ID, &existing.RewardID, &existing.AdjustmentType,
+					&existing.DeltaQuantity, &existing.DeltaAmount, &existing.Reason,
+					&existing.IdempotencyKey, &existing.CreatedAt, &storedResponse,
+				)
+				if err != nil {
+					logger.WithError(err).Error("Failed to fetch existing adjustment")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				if existing.RewardID != rewardID || existing.AdjustmentType != req.AdjustmentType ||
+					existing.DeltaQuantity != req.DeltaQuantity || existing.DeltaAmount != req.DeltaAmount || existing.Reason != req.Reason {
+					response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
+					return
+				}
+				var replay interface{}
+				if len(storedResponse) == 0 || json.Unmarshal(storedResponse, &replay) != nil {
+					logger.Error("Stored adjustment response is invalid")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				if err := tx.Commit(); err != nil {
+					logger.WithError(err).Error("Failed to commit retry transaction")
+					response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+					return
+				}
+				committed = true
+				response.WriteJson(c.Writer, http.StatusOK, replay)
+				return
+			}
+		}
 		logger.WithError(err).Error("Failed to insert adjustment")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
@@ -203,6 +261,24 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		}
 	}
 
+	responseBody := map[string]interface{}{
+		"message":     "Adjustment applied successfully",
+		"rewardId":    rewardID,
+		"stockSymbol": stockSymbol,
+		"data":        inserted,
+	}
+	responseJSON, err := json.Marshal(responseBody)
+	if err != nil {
+		logger.WithError(err).Error("Failed to encode adjustment response")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE adjustments SET original_response = $1 WHERE id = $2`, responseJSON, inserted.ID); err != nil {
+		logger.WithError(err).Error("Failed to store original adjustment response")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		logger.WithError(err).Error("Failed to commit transaction")
@@ -217,10 +293,5 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		"delta_amount":  req.DeltaAmount,
 	}).Info("Adjustment applied successfully")
 
-	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"message":     "Adjustment applied successfully",
-		"rewardId":    rewardID,
-		"stockSymbol": stockSymbol,
-		"data":        inserted,
-	})
+	response.WriteJson(c.Writer, http.StatusOK, responseBody)
 }
