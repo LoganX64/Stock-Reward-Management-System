@@ -27,6 +27,7 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 - Maintain ledger entries for stock units, cash flows, and fees.
 - Calculate current portfolio and historical INR values.
 - Keep unpriced holdings visible with explicit missing-price status instead of silently dropping them.
+- Keep historical rewards visible with explicit missing-history status instead of silently dropping them.
 - Support stock splits, bonus issues, mergers, and delisting.
 - Adjust split/bonus prices and quantities exactly once while preserving raw prices.
 - Apply effective-dated quantity movements so post-split corrections are not scaled twice.
@@ -76,7 +77,22 @@ Example response:
   "userId": 1,
   "limit": 100,
   "offset": 0,
-  "history": []
+  "history": [
+    {
+      "rewardDate": "2026-10-27",
+      "rewardEventId": 2,
+      "stockSymbol": "NEWCO",
+      "adjustedQuantity": 5,
+      "price": null,
+      "totalAdjustmentAmount": 0,
+      "inrValue": null,
+      "priceStatus": "missing",
+      "priceAsOf": null
+    }
+  ],
+  "valuationComplete": false,
+  "unpricedRewards": 1,
+  "unpricedSymbols": ["NEWCO"]
 }
 ```
 
@@ -103,6 +119,8 @@ A holding is never dropped because its current price is missing. When no `stock_
 
 `/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`.
 
+Historical rewards use the same explicit-gap rule. When `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete historical set, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp.
+
 `/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
 
 ---
@@ -126,7 +144,7 @@ The project uses PostgreSQL with the following main tables and views:
 - `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity.
 - `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash, cash-in-lieu proceeds, and written-off quantity.
 - `today_rewards` (VIEW): Today's reward values with explicit current-price status.
-- `historical_rewards` (VIEW): Historical reward values.
+- `historical_rewards` (VIEW): Historical reward values with explicit reward-date price status.
 - `user_portfolio` (VIEW): Aggregated current portfolio holdings, including holdings whose current price is missing.
 - `reward_ledger_reconciliation` (VIEW): Per-reward stock, cash, adjustment, and fee reconciliation.
 
@@ -168,7 +186,7 @@ The project uses PostgreSQL with the following main tables and views:
 - Corporate-action cash is posted physically to `ledger` as positive `inr_outflow` rows tagged with `ledger.stock_event_id`. The unique key `(reward_id, stock_event_id)` makes posting idempotent. An `AFTER` statement trigger on `stock_events` posts immediately, and the background `CorporateActionService` runs at startup and daily to post future-dated events when they become effective. `process_corporate_action_cash(as_of)` updates or removes stale postings when events change.
 - `reward_ledger_reconciliation` excludes corporate-action cash from adjustment-cash reconciliation and compares derived corporate-action cash with the tagged ledger postings through `corporate_action_cash_matches`.
 - `reward_corporate_action_outcomes` is the shared per-reward outcome source for `today_rewards` and `user_portfolio`; `/portfolio` and `/stats` therefore return the same cash and write-off totals. `totalPortfolioValue` remains stock-value-only.
-- `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price.
+- `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price. Missing reward-date prices remain visible with `price_status = 'missing'` and null `price`/`inr_value`.
 - Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
 - `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
 
@@ -274,7 +292,7 @@ go test -v github.com/LoganX64/stocky-api/internal/handlers/stocky
 Test files in `internal/handlers/stocky/`:
 
 - `adjustment_test.go` - Tests adjustment validation and reversal ledger behavior.
-- `historical_test.go` - Tests historical endpoint validation.
+- `historical_test.go` - Tests historical endpoint validation and missing-history behavior.
 - `portfolio_test.go` - Tests portfolio endpoint validation, cash outcomes, and missing-price holdings.
 - `reward_handler_test.go` - Tests reward validation, route registration, idempotency, normalization, and fee ledger entries.
 - `stats_test.go` - Tests stats endpoint validation and incomplete-valuation reporting.
@@ -308,8 +326,8 @@ Current behavior:
 1. Reads symbols and prices from `stock_prices`.
 2. Uses `RandomPriceFetcher` to generate a new price from the last stored price.
 3. Sometimes simulates a fetch failure and returns a dampened fallback price.
-4. Updates `stock_prices`.
-5. Inserts or updates the current day's row in `stock_price_history`.
+4. Updates `stock_prices` when the generated price differs from the stored price.
+5. Inserts or updates the current day's row in `stock_price_history` on every cycle, including when the price is unchanged.
 6. Stores recently updated prices in an in-memory `PriceCache`.
 
 Reliability features:
@@ -319,6 +337,20 @@ Reliability features:
 - Retry logic for database updates and history inserts.
 - Panic recovery in update cycles and workers.
 - Context-aware shutdown.
+
+### Seeding and backfilling price history
+
+Migration `0020_missing_historical_prices` adds a supported database function that fills missing history rows from the latest known `stock_prices` values:
+
+```sql
+-- Seed today's missing history rows.
+SELECT backfill_price_history();
+
+-- Seed a specific date.
+SELECT backfill_price_history('2026-10-27');
+```
+
+The function only inserts symbol/date pairs that have no history row and returns the number of rows inserted. It uses the latest stored price, which is intended for local/demo data; real historical prices should be imported from an authoritative market-data source. `/historical-inr` still marks any remaining gap as `priceStatus: "missing"` rather than hiding the reward.
 
 ---
 
@@ -332,6 +364,7 @@ Reliability features:
 - **Negative quantities after adjustment** - Prevented by transactional validation.
 - **Rounding** - Amounts and quantities are rounded consistently.
 - **Missing current prices** - `today_rewards` and `user_portfolio` use a left join to adjusted current prices. Unpriced rewards/holdings remain visible with `priceStatus: "missing"` and null price/value; `/portfolio` and `/stats` return `valuationComplete`, an unpriced count, and `unpricedSymbols`. `totalPortfolioValue` is priced-holdings-only.
+- **Missing historical prices** - `historical_rewards` left-joins adjusted reward-date prices. Unpriced rewards remain visible with `priceStatus: "missing"` and null price/value; `/historical-inr` returns full-set `valuationComplete`, `unpricedRewards`, and `unpricedSymbols`.
 - **Transaction safety** - Reward creation and adjustment workflows use transactions.
 
 ### Ledger reconciliation

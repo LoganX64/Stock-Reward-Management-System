@@ -73,13 +73,15 @@ type Adjustment struct {
 }
 
 type HistoricalINR struct {
-	RewardDate            string  `json:"rewardDate"`
-	RewardEventID         int     `json:"rewardEventId"`
-	StockSymbol           string  `json:"stockSymbol"`
-	AdjustedQuantity      float64 `json:"adjustedQuantity"`
-	Price                 float64 `json:"price"`
-	TotalAdjustmentAmount float64 `json:"totalAdjustmentAmount"`
-	INRValue              float64 `json:"inrValue"`
+	RewardDate            string     `json:"rewardDate"`
+	RewardEventID         int        `json:"rewardEventId"`
+	StockSymbol           string     `json:"stockSymbol"`
+	AdjustedQuantity      float64    `json:"adjustedQuantity"`
+	Price                 *float64   `json:"price"`
+	TotalAdjustmentAmount float64    `json:"totalAdjustmentAmount"`
+	INRValue              *float64   `json:"inrValue"`
+	PriceStatus           string     `json:"priceStatus"`
+	PriceAsOf             *time.Time `json:"priceAsOf"`
 }
 
 type TodayReward struct {

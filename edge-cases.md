@@ -61,12 +61,14 @@
 
 ### Historical prices
 
-- **Problem:** Historical INR values depend on `stock_price_history`.
+- **Problem:** Historical INR values depend on `stock_price_history`, and a missing row used to hide the reward entirely.
 - **Handling:**
-  - `historical_rewards` joins rewards to `stock_price_history` by reward date.
-  - If there is no history row for a reward's date and symbol, that reward will not appear in historical results.
-  - The background price service inserts or updates daily history rows when it updates prices.
-  - Deployments should ensure daily history exists for dates that need historical reporting.
+  - `historical_rewards` left-joins rewards to `stock_price_history_adjusted` by reward date.
+  - A reward with no history row remains visible with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`.
+  - `/historical-inr` returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's full historical set so clients can detect incomplete totals.
+  - The background price service inserts or updates a daily history row on every cycle, including when the price is unchanged.
+  - Missing dates can be seeded through `SELECT backfill_price_history('YYYY-MM-DD');`, which inserts missing rows from the latest `stock_prices` values.
+  - Real historical prices should be imported from an authoritative source; the backfill function is a local/demo convenience and does not fabricate multiple days automatically.
 
 ## 4. Rounding Errors in INR Valuation
 
@@ -85,7 +87,7 @@
   - `PriceService.Start` runs a background update loop.
   - `RandomPriceFetcher` generates simulated price changes from the last stored price.
   - When `RandomPriceFetcher` simulates a fetch failure, it returns a dampened fallback price based on the last stored price.
-  - Successful updates are written to `stock_prices` and `stock_price_history`.
+  - Successful fetch cycles update `stock_prices` when the price changed and always upsert today's `stock_price_history` row, including unchanged prices.
 
 ## 6. Adjustments and Refunds
 
@@ -130,7 +132,7 @@ This system handles:
 
 1. Duplicate rewards and idempotent retries.
 2. Stock events and delisting behavior.
-3. Missing historical price data as an explicit reporting dependency.
+3. Missing historical price data as an explicit reporting status with supported backfill.
 4. Consistent rounding for quantities and INR values.
 5. Simulated price update failures.
 6. Transactional reward adjustments.

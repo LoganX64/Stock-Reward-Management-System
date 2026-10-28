@@ -324,10 +324,7 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 			Info("Price fetched successfully")
 	}
 
-	if newPrice == job.OldPrice {
-		log.WithField("price", newPrice).Debug("Price unchanged, skipping update")
-		return
-	}
+	priceChanged := newPrice != job.OldPrice
 
 	// Acquire DB semaphore
 	select {
@@ -337,21 +334,27 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 		return
 	}
 
-	// Update database
-	if err := s.updatePrice(ctx, job.Symbol, newPrice); err != nil {
-		log.WithError(err).Error("DB price update failed -- cache not updated")
-		return
+	// Update the latest price only when it changed. History is written on every
+	// cycle so a day with an unchanged price still has a daily history row.
+	if priceChanged {
+		if err := s.updatePrice(ctx, job.Symbol, newPrice); err != nil {
+			log.WithError(err).Error("DB price update failed -- cache not updated")
+			return
+		}
 	}
 
 	// Update cache
 	s.cache.SetPrice(job.Symbol, newPrice, s.opts.Now())
 
-	// Log successful update
-	log.WithFields(logrus.Fields{
-		"old_price": job.OldPrice,
-		"new_price": newPrice,
-		"change":    utils.RoundAmount(newPrice - job.OldPrice),
-	}).Info("Price updated successfully")
+	if priceChanged {
+		log.WithFields(logrus.Fields{
+			"old_price": job.OldPrice,
+			"new_price": newPrice,
+			"change":    utils.RoundAmount(newPrice - job.OldPrice),
+		}).Info("Price updated successfully")
+	} else {
+		log.WithField("price", newPrice).Debug("Price unchanged, recording daily history")
+	}
 
 	// Insert history
 	if err := s.insertHistory(ctx, job.Symbol, newPrice); err != nil {
@@ -418,7 +421,8 @@ func (s *PriceService) insertHistory(ctx context.Context, symbol string, price f
 			INSERT INTO stock_price_history (stock_symbol, price, date)
 			VALUES ($1, $2, CURRENT_DATE)
 			ON CONFLICT (stock_symbol, date) DO UPDATE
-			SET price = EXCLUDED.price
+			SET price = EXCLUDED.price,
+			    created_at = NOW()
 		`, symbol, price)
 		if lastErr == nil {
 			return nil

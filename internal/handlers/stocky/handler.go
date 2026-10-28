@@ -60,3 +60,39 @@ func (h *Handler) getUnpricedPortfolioSymbols(userID int) ([]string, error) {
 	}
 	return symbols, nil
 }
+
+// getUnpricedHistoricalRewards counts historical reward rows that have no
+// reward-date price and returns the distinct affected symbols.
+func (h *Handler) getUnpricedHistoricalRewards(userID int) (int, []string, error) {
+	rows, err := h.DB.Query(`
+		SELECT stock_symbol
+		FROM historical_rewards
+		WHERE user_id = $1
+		  AND reward_date < CURRENT_DATE
+		  AND price IS NULL
+		ORDER BY stock_symbol
+	`, userID)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer rows.Close()
+
+	count := 0
+	seen := map[string]struct{}{}
+	symbols := []string{}
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return 0, nil, err
+		}
+		count++
+		if _, ok := seen[symbol]; !ok {
+			seen[symbol] = struct{}{}
+			symbols = append(symbols, symbol)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	return count, symbols, nil
+}

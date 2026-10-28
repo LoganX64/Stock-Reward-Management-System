@@ -17,6 +17,7 @@ func main() {
 
 	// Drop all views and corporate-action functions first
 	dropViews := `
+		DROP FUNCTION IF EXISTS backfill_price_history(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS process_corporate_action_cash(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS sync_corporate_action_cash_trigger() CASCADE;
 		DROP FUNCTION IF EXISTS reward_corporate_action_cash_details(DATE) CASCADE;

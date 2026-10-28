@@ -2,6 +2,7 @@
 package stocky
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -34,7 +35,9 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			adjusted_quantity, 
 			price, 
 			total_adjustment_amount, 
-			inr_value
+			inr_value,
+			price_status,
+			price_as_of
 		FROM historical_rewards
 		WHERE user_id = $1
 		  AND reward_date < CURRENT_DATE
@@ -51,25 +54,41 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	var history []models.HistoricalINR
 	for rows.Next() {
 		var rec models.HistoricalINR
+		var price sql.NullFloat64
+		var inrValue sql.NullFloat64
+		var priceAsOf sql.NullTime
 		if err := rows.Scan(
 			&rec.RewardDate,
 			&rec.RewardEventID,
 			&rec.StockSymbol,
 			&rec.AdjustedQuantity,
-			&rec.Price,
+			&price,
 			&rec.TotalAdjustmentAmount,
-			&rec.INRValue,
+			&inrValue,
+			&rec.PriceStatus,
+			&priceAsOf,
 		); err != nil {
 			logger.WithError(err).Error("Failed to scan historical INR record")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
 		}
 
-		// Apply consistent rounding
+		// Apply consistent rounding to available values and preserve NULL for
+		// missing reward-date prices.
 		rec.AdjustedQuantity = utils.RoundQuantity(rec.AdjustedQuantity)
-		rec.Price = utils.RoundAmount(rec.Price)
 		rec.TotalAdjustmentAmount = utils.RoundAmount(rec.TotalAdjustmentAmount)
-		rec.INRValue = utils.RoundAmount(rec.INRValue)
+		if price.Valid {
+			v := utils.RoundAmount(price.Float64)
+			rec.Price = &v
+		}
+		if inrValue.Valid {
+			v := utils.RoundAmount(inrValue.Float64)
+			rec.INRValue = &v
+		}
+		if priceAsOf.Valid {
+			t := priceAsOf.Time
+			rec.PriceAsOf = &t
+		}
 
 		history = append(history, rec)
 	}
@@ -79,11 +98,26 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+	if err := rows.Close(); err != nil {
+		logger.WithError(err).Error("Failed to close historical INR rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
+	unpricedRewards, unpricedSymbols, err := h.getUnpricedHistoricalRewards(userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch unpriced historical rewards")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
 
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"userId":  userID,
-		"limit":   limit,
-		"offset":  offset,
-		"history": utils.OrEmpty(history),
+		"userId":            userID,
+		"limit":             limit,
+		"offset":            offset,
+		"history":           utils.OrEmpty(history),
+		"valuationComplete": unpricedRewards == 0,
+		"unpricedRewards":   unpricedRewards,
+		"unpricedSymbols":   utils.OrEmpty(unpricedSymbols),
 	})
 }
