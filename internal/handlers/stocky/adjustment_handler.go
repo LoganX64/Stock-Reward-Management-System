@@ -94,8 +94,11 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				FROM reward_quantity_movements m
 				WHERE m.reward_id = r.id
 			), 0) AS normalized_quantity,
-			stock_quantity_factor(r.stock_symbol, r.created_at::date)
-				/ stock_quantity_factor(r.stock_symbol, CURRENT_DATE) AS normalization_factor
+			1::numeric / instrument_quantity_factor(
+				r.stock_symbol,
+				r.created_at::date,
+				CURRENT_DATE
+			) AS normalization_factor
 		FROM rewards r
 		WHERE r.id = $1
 		FOR UPDATE

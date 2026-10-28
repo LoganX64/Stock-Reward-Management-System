@@ -18,10 +18,12 @@
   - `stock_events` tracks splits, bonus issues, mergers, and delisting events with explicit effective dates and ratios.
   - Prices stay raw in `stock_prices` and `stock_price_history`; `stock_prices_adjusted` and `stock_price_history_adjusted` apply split/bonus factors once at read time so raw values are never scaled twice.
   - A 2:1 split or 1:1 bonus is stored as `2/1`; a 1:5 reverse split is stored as `1/5`.
-  - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split correction is not multiplied by the prior split.
-  - `user_portfolio` and `today_rewards` use movement-derived current balances and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
-  - `user_portfolio` excludes delisted stocks whose delisting effective date is on or before the current date.
-  - `today_rewards` does not independently filter delisted stocks.
+  - `instrument_lineage` exposes normalized merger edges. A merger chain such as A→B→C is resolved recursively, composing ratios and effective dates.
+  - Split/bonus events on B or C apply only while the holding is in that instrument. An event after the holding has moved to the next successor is ignored.
+  - Merger events require a distinct successor and positive ratios. A trigger rejects lineage cycles, and each predecessor may have only one merge event.
+  - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split or post-merger correction is not multiplied by prior events.
+  - `user_portfolio` and `today_rewards` use movement-derived current balances, the terminal successor symbol, and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
+  - Delist filtering resolves the terminal symbol first. A delist on a predecessor after a merger does not remove the successor holding; a delist on the terminal instrument does.
 
 ## 3. Missing Historical Prices
 

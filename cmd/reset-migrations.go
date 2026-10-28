@@ -15,8 +15,13 @@ func main() {
 	}
 	defer db.Close()
 
-	// Drop all views first
+	// Drop all views and lineage functions first
 	dropViews := `
+		DROP FUNCTION IF EXISTS instrument_is_delisted(TEXT, DATE, DATE) CASCADE;
+		DROP FUNCTION IF EXISTS instrument_quantity_factor(TEXT, DATE, DATE) CASCADE;
+		DROP FUNCTION IF EXISTS instrument_terminal_symbol(TEXT, DATE, DATE) CASCADE;
+		DROP FUNCTION IF EXISTS instrument_chain(TEXT, DATE, DATE) CASCADE;
+		DROP VIEW IF EXISTS instrument_lineage CASCADE;
 		DROP VIEW IF EXISTS historical_rewards CASCADE;
 		DROP VIEW IF EXISTS today_rewards CASCADE;
 	`

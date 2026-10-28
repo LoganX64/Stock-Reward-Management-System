@@ -103,6 +103,7 @@ The project uses PostgreSQL with the following main tables and views:
 - `stock_price_history`: Daily stock price history.
 - `stock_events`: Splits, bonus issues, mergers, and delisting events.
 - `adjustments`: Manual corrections, fee refunds, and reward reversals with effective dates.
+- `instrument_lineage` (VIEW): Normalized merger edges derived from `stock_events`, used to resolve A→B→C chains.
 - `stock_prices_adjusted` (VIEW): Raw latest prices with split/bonus factors applied.
 - `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
 - `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
@@ -123,9 +124,12 @@ The project uses PostgreSQL with the following main tables and views:
 
 - Raw prices remain in `stock_prices` and `stock_price_history`. Split/bonus factors are applied by the adjusted views, never written back.
 - A 2:1 forward split or 1:1 bonus uses ratio `2/1`; a 1:5 reverse split uses `1/5`. Only `split` and `bonus` events affect prices.
+- Merger lineage is resolved recursively. A reward in A follows A→B→C, composing every merger ratio and applying split/bonus events only while the holding is in each successor instrument.
+- Merger events must have a distinct successor and positive ratios. A database trigger rejects lineage cycles, and each predecessor may have only one merge event.
+- Delist filtering resolves the terminal successor first. A predecessor delisting after a merger does not remove the valid successor holding; a delisting of the terminal instrument does.
 - `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price.
-- Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units, so a post-split correction is not multiplied by the earlier split.
-- `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same event factors.
+- Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
+- `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
 
 ---
 
