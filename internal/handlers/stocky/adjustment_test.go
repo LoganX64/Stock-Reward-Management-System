@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -86,11 +85,11 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT quantity, stock_symbol FROM rewards WHERE id = $1 FOR UPDATE")).
+	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"quantity", "stock_symbol"}).AddRow(5.0, "TCS"))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor"}).AddRow("TCS", 5.0, 1.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
-		WithArgs(1, models.Reward_Reversal, -1.0, 100.0, "reversal refund").
+		WithArgs(1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id",
 			"reward_id",
@@ -98,10 +97,12 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 			"delta_quantity",
 			"delta_amount",
 			"reason",
+			"idempotency_key",
+			"effective_date",
 			"created_at",
-		}).AddRow(1, 1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "2026-05-28T00:00:00Z"))
+		}).AddRow(1, 1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "", "2026-05-28", "2026-05-28T00:00:00Z"))
 	mock.ExpectExec("UPDATE rewards").
-		WithArgs(-1.0, 1).
+		WithArgs(4.0, 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger").
 		WithArgs(1, models.StockUnits, "TCS", -1.0, 0.0).
@@ -109,6 +110,9 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 	mock.ExpectExec("INSERT INTO ledger").
 		WithArgs(1, models.INROutflow, "", 0.0, 100.0).
 		WillReturnResult(sqlmock.NewResult(2, 1))
+	mock.ExpectExec("UPDATE adjustments SET original_response").
+		WithArgs(sqlmock.AnyArg(), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	payload := `{
@@ -126,6 +130,67 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for reward reversal, got %d", w.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
+	}
+}
+
+func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT.*r\.stock_symbol.*normalized_quantity_delta.*normalization_factor.*FOR UPDATE`).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "normalized_quantity", "normalization_factor"}).AddRow("TCS", 5.0, 0.5))
+	mock.ExpectQuery("INSERT INTO adjustments").
+		WithArgs(1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id",
+			"reward_id",
+			"adjustment_type",
+			"delta_quantity",
+			"delta_amount",
+			"reason",
+			"idempotency_key",
+			"effective_date",
+			"created_at",
+		}).AddRow(2, 1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "", "2026-05-28", "2026-05-28T00:00:00Z"))
+	mock.ExpectExec("UPDATE rewards").
+		WithArgs(6.0, 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO ledger").
+		WithArgs(1, models.StockUnits, "TCS", 2.0, 0.0).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE adjustments SET original_response").
+		WithArgs(sqlmock.AnyArg(), 2).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	payload := `{
+		"adjustment_type": "manual_correction",
+		"delta_quantity": 2,
+		"reason": "post-split correction"
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/adjustments/1", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for post-split correction, got %d", w.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)

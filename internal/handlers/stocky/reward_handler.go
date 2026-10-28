@@ -105,9 +105,9 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 
-	// Fetch current price
+	// Fetch current split/bonus-adjusted price
 	var currentPrice float64
-	if err := tx.QueryRowContext(ctx, `SELECT price FROM stock_prices WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT adjusted_price FROM stock_prices_adjusted WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Stock symbol not found"))
 			return

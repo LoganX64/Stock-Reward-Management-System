@@ -81,15 +81,25 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		}
 	}()
 
-	// Fetch quantity AND stock_symbol in a SINGLE query and lock the reward row for update
+	// Fetch the reward at its reward-date-equivalent balance and lock it for update.
+	// The requested delta is denominated in units on the adjustment effective date.
 	var currentQty float64
 	var stockSymbol string
+	var normalizationFactor float64
 	err = tx.QueryRowContext(ctx, `
-		SELECT quantity, stock_symbol 
-		FROM rewards 
-		WHERE id = $1
+		SELECT
+			r.stock_symbol,
+			COALESCE((
+				SELECT SUM(m.normalized_quantity_delta)
+				FROM reward_quantity_movements m
+				WHERE m.reward_id = r.id
+			), 0) AS normalized_quantity,
+			stock_quantity_factor(r.stock_symbol, r.created_at::date)
+				/ stock_quantity_factor(r.stock_symbol, CURRENT_DATE) AS normalization_factor
+		FROM rewards r
+		WHERE r.id = $1
 		FOR UPDATE
-	`, rewardID).Scan(&currentQty, &stockSymbol)
+	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward not found"))
@@ -99,8 +109,10 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	// Prevent negative quantity
-	if currentQty+req.DeltaQuantity < 0 {
+
+	normalizedDelta := req.DeltaQuantity * normalizationFactor
+	newQty := currentQty + normalizedDelta
+	if newQty < 0 {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
@@ -118,9 +130,9 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 	// Insert adjustment
 	var inserted models.Adjustment
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, idempotency_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NOW())
-		RETURNING id, reward_id, adjustment_type, delta_quantity, delta_amount, reason, COALESCE(idempotency_key, ''), created_at
+		INSERT INTO adjustments (reward_id, adjustment_type, delta_quantity, delta_amount, reason, idempotency_key, effective_date, created_at)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), CURRENT_DATE, NOW())
+		RETURNING id, reward_id, adjustment_type, delta_quantity, delta_amount, reason, COALESCE(idempotency_key, ''), effective_date::text, created_at
 	`,
 		rewardID,
 		req.AdjustmentType,
@@ -135,6 +147,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		&inserted.DeltaAmount,
 		&inserted.Reason,
 		&inserted.IdempotencyKey,
+		&inserted.EffectiveDate,
 		&inserted.CreatedAt,
 	)
 	if err != nil {
@@ -149,12 +162,12 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				var storedResponse []byte
 				err = tx.QueryRowContext(ctx, `
 					SELECT id, reward_id, adjustment_type, delta_quantity, delta_amount, COALESCE(reason, ''),
-					       COALESCE(idempotency_key, ''), created_at, original_response
+					       COALESCE(idempotency_key, ''), effective_date::text, created_at, original_response
 					FROM adjustments WHERE idempotency_key = $1
 				`, req.IdempotencyKey).Scan(
 					&existing.ID, &existing.RewardID, &existing.AdjustmentType,
 					&existing.DeltaQuantity, &existing.DeltaAmount, &existing.Reason,
-					&existing.IdempotencyKey, &existing.CreatedAt, &storedResponse,
+					&existing.IdempotencyKey, &existing.EffectiveDate, &existing.CreatedAt, &storedResponse,
 				)
 				if err != nil {
 					logger.WithError(err).Error("Failed to fetch existing adjustment")
@@ -187,13 +200,13 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 
-	// Update the main reward's quantity with a safety check to ensure the row remains non-negative
+	// Store the new reward-date-equivalent balance with a non-negative guard.
 	res, err := tx.ExecContext(ctx, `
-    UPDATE rewards 
-    SET quantity = quantity + $1 
+    UPDATE rewards
+    SET quantity = $1
     WHERE id = $2
-      AND quantity + $1 >= 0
-`, req.DeltaQuantity, rewardID)
+      AND $1 >= 0
+`, newQty, rewardID)
 
 	if err != nil {
 		logger.WithError(err).Error("Failed to update reward quantity")

@@ -66,6 +66,7 @@ type Adjustment struct {
 	DeltaQuantity  float64 `json:"delta_quantity"`
 	DeltaAmount    float64 `json:"delta_amount"`
 	Reason         string  `json:"reason"`
+	EffectiveDate  string  `json:"effective_date,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 }
 

@@ -27,6 +27,8 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 - Maintain ledger entries for stock units, cash flows, and fees.
 - Calculate current portfolio and historical INR values.
 - Support stock splits, bonus issues, mergers, and delisting.
+- Adjust split/bonus prices and quantities exactly once while preserving raw prices.
+- Apply effective-dated quantity movements so post-split corrections are not scaled twice.
 - Paginate historical INR and portfolio endpoints.
 - Track request IDs for logs.
 - Run a simulated background price updater with worker concurrency and database retry logic.
@@ -100,10 +102,15 @@ The project uses PostgreSQL with the following main tables and views:
 - `stock_prices`: Latest stock prices.
 - `stock_price_history`: Daily stock price history.
 - `stock_events`: Splits, bonus issues, mergers, and delisting events.
-- `adjustments`: Manual corrections, fee refunds, and reward reversals.
+- `adjustments`: Manual corrections, fee refunds, and reward reversals with effective dates.
+- `stock_prices_adjusted` (VIEW): Raw latest prices with split/bonus factors applied.
+- `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
+- `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
+- `reward_current_balances` (VIEW): Movement-derived current quantity per reward.
 - `today_rewards` (VIEW): Today's reward values.
 - `historical_rewards` (VIEW): Historical reward values.
 - `user_portfolio` (VIEW): Aggregated current portfolio holdings.
+- `reward_ledger_reconciliation` (VIEW): Per-reward stock, cash, adjustment, and fee reconciliation.
 
 ### Key Relationships
 
@@ -111,6 +118,14 @@ The project uses PostgreSQL with the following main tables and views:
 - `rewards` -> `ledger` (`reward_id`)
 - `rewards` -> `adjustments` (`reward_id`)
 - `stock_events` -> `stock_prices` (`stock_symbol`)
+
+### Corporate actions and adjustment timing
+
+- Raw prices remain in `stock_prices` and `stock_price_history`. Split/bonus factors are applied by the adjusted views, never written back.
+- A 2:1 forward split or 1:1 bonus uses ratio `2/1`; a 1:5 reverse split uses `1/5`. Only `split` and `bonus` events affect prices.
+- `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price.
+- Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units, so a post-split correction is not multiplied by the earlier split.
+- `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same event factors.
 
 ---
 
@@ -284,7 +299,7 @@ WHERE NOT is_reconciled
 ORDER BY reward_id;
 ```
 
-The view compares mutable reward quantity to stock-unit postings under the original reward symbol, adjustment amounts to their INR ledger postings, and the original reward cash flow and fees to the stored creation response.
+The view compares movement-derived reward quantity to stock-unit postings under the original reward symbol after normalizing both for corporate actions, adjustment amounts to their INR ledger postings, and the original reward cash flow and fees to the stored creation response.
 
 ---
 

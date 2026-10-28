@@ -15,10 +15,13 @@
 
 - **Problem:** Corporate actions can change stock quantities, symbols, and portfolio visibility.
 - **Handling:**
-  - `stock_events` tracks splits, bonus issues, mergers, and delisting events.
-  - `historical_rewards` and `user_portfolio` apply cumulative multipliers for split/bonus/merge-style events.
+  - `stock_events` tracks splits, bonus issues, mergers, and delisting events with explicit effective dates and ratios.
+  - Prices stay raw in `stock_prices` and `stock_price_history`; `stock_prices_adjusted` and `stock_price_history_adjusted` apply split/bonus factors once at read time so raw values are never scaled twice.
+  - A 2:1 split or 1:1 bonus is stored as `2/1`; a 1:5 reverse split is stored as `1/5`.
+  - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split correction is not multiplied by the prior split.
+  - `user_portfolio` and `today_rewards` use movement-derived current balances and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
   - `user_portfolio` excludes delisted stocks whose delisting effective date is on or before the current date.
-  - `today_rewards` currently shows today's rewards from the reward and price tables and does not independently filter delisted stocks.
+  - `today_rewards` does not independently filter delisted stocks.
 
 ## 3. Missing Historical Prices
 
@@ -52,10 +55,11 @@
 
 - **Problem:** Existing rewards may need reversals, fee refunds, or manual corrections.
 - **Handling:**
-  - `adjustments` stores `delta_quantity`, `delta_amount`, adjustment type, and reason.
+  - `adjustments` stores `delta_quantity`, `delta_amount`, adjustment type, reason, and an `effective_date`.
   - The adjustment handler locks the reward row with `FOR UPDATE`.
+  - Deltas are denominated in units on the effective date. They are normalized to the reward-date-equivalent balance before the non-negative check.
   - It rejects changes that would make the reward quantity negative.
-  - It updates the reward quantity and inserts adjustment ledger entries in a single transaction.
+  - It updates the normalized reward balance and inserts adjustment ledger entries in a single transaction.
 
 ## 7. Pagination
 
@@ -76,7 +80,8 @@
   - Stock prices are indexed by stock symbol.
 - **Views for Computation:**
   - Portfolio and historical calculations are centralized in database views.
-  - Split and bonus multipliers use logarithmic product aggregation with `EXP(SUM(LN(ratio)))`.
+  - Split/bonus and quantity factors use logarithmic product aggregation with `EXP(SUM(LN(ratio)))`.
+  - Effective-dated quantity movements let reporting apply only corporate actions that occur after each movement.
 - **Background Jobs:**
   - `PriceService` uses a worker pool for concurrent price updates.
   - A buffered-channel semaphore limits concurrent database writes.
