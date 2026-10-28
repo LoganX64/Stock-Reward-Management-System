@@ -21,7 +21,17 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	rows, err := h.DB.Query(`
+	// Today's rewards and the portfolio totals must describe the same
+	// valuation date and snapshot as each other.
+	tx, err := h.beginReadSnapshot(c.Request.Context())
+	if err != nil {
+		logger.WithError(err).Error("Failed to start stats read snapshot")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
 		SELECT stock_symbol, adjusted_quantity
 		FROM today_rewards
 		WHERE user_id = $1
@@ -31,12 +41,12 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	defer rows.Close()
 
 	var todayRewards []models.TodayReward
 	for rows.Next() {
 		var tr models.TodayReward
 		if err := rows.Scan(&tr.StockSymbol, &tr.TotalQuantity); err != nil {
+			rows.Close()
 			logger.WithError(err).Error("Failed to scan today reward")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
@@ -47,33 +57,40 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 	}
 
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		logger.WithError(err).Error("Error iterating today rewards rows")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+	if err := rows.Close(); err != nil {
+		logger.WithError(err).Error("Failed to close today rewards rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
 
-	var totalPortfolioValue float64
-	err = h.DB.QueryRow(`
-		SELECT COALESCE(SUM(inr_value), 0)
-		FROM user_portfolio
-		WHERE user_id = $1
-	`, userID).Scan(&totalPortfolioValue)
+	totalPortfolioValue, totalPositions, valuationDate, err := h.getPortfolioTotals(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch total portfolio value")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
 
-	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(userID)
+	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
 
-	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(userID)
+	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		logger.WithError(err).Error("Failed to commit stats read snapshot")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
@@ -82,6 +99,8 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		"userId":              userID,
 		"todayRewards":        utils.OrEmpty(todayRewards),
 		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
+		"totalPositions":      totalPositions,
+		"valuationDate":       valuationDate,
 		"valuationComplete":   len(unpricedSymbols) == 0,
 		"unpricedPositions":   len(unpricedSymbols),
 		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),

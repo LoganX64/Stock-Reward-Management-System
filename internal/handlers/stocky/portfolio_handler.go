@@ -25,10 +25,21 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
+	// Every read in this response shares one read-only repeatable-read
+	// snapshot. That keeps the page, the full-set totals, the unpriced set, and
+	// the corporate-action outcome on the same valuation date and MVCC state.
+	tx, err := h.beginReadSnapshot(c.Request.Context())
+	if err != nil {
+		logger.WithError(err).Error("Failed to start portfolio read snapshot")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
+	defer tx.Rollback()
+
 	// Query from the shared outcome-aware view. Delist filtering and missing
 	// price handling are applied inside user_portfolio so /portfolio and /stats
 	// cannot diverge.
-	rows, err := h.DB.Query(`
+	rows, err := tx.Query(`
 		SELECT
 			p.stock_symbol,
 			p.adjusted_quantity,
@@ -47,7 +58,6 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
-	defer rows.Close()
 
 	portfolio := []models.PortfolioItem{}
 	for rows.Next() {
@@ -63,6 +73,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 			&inrValue,
 			&item.PriceStatus,
 			&priceAsOf); err != nil {
+			rows.Close()
 			logger.WithError(err).Error("Failed to scan portfolio data for user ")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 			return
@@ -86,35 +97,57 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		portfolio = append(portfolio, item)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		logger.WithError(err).Error("Error iterating portfolio rows")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
+	if err := rows.Close(); err != nil {
+		logger.WithError(err).Error("Failed to close portfolio rows")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
 
-	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(userID)
+	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
 
-	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(userID)
+	totalPortfolioValue, totalPositions, valuationDate, err := h.getPortfolioTotals(tx, userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch portfolio totals")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
+
+	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
 
+	if err := tx.Commit(); err != nil {
+		logger.WithError(err).Error("Failed to commit portfolio read snapshot")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
+
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
-		"userId":             userID,
-		"limit":              limit,
-		"offset":             offset,
-		"portfolio":          utils.OrEmpty(portfolio),
-		"valuationComplete":  len(unpricedSymbols) == 0,
-		"unpricedPositions":  len(unpricedSymbols),
-		"unpricedSymbols":    utils.OrEmpty(unpricedSymbols),
-		"cashProceeds":       utils.RoundAmount(cashProceeds),
-		"cashInLieuProceeds": utils.RoundAmount(cashInLieuProceeds),
-		"writtenOffQuantity": utils.RoundQuantity(writtenOffQuantity),
+		"userId":              userID,
+		"limit":               limit,
+		"offset":              offset,
+		"portfolio":           utils.OrEmpty(portfolio),
+		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
+		"totalPositions":      totalPositions,
+		"valuationDate":       valuationDate,
+		"valuationComplete":   len(unpricedSymbols) == 0,
+		"unpricedPositions":   len(unpricedSymbols),
+		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
+		"cashProceeds":        utils.RoundAmount(cashProceeds),
+		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
+		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),
 	})
 }

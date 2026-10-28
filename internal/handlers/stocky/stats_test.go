@@ -48,6 +48,7 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
 
+	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -55,9 +56,13 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 			"adjusted_quantity",
 		}).AddRow("B", 200.0))
 
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_portfolio")).
+	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(10000.0))
+		WillReturnRows(sqlmock.NewRows([]string{
+			"total_portfolio_value",
+			"total_positions",
+			"valuation_date",
+		}).AddRow(10000.0, 1, "2026-10-28"))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).
@@ -70,6 +75,7 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
 		}).AddRow(1000.0, 25.0, 250.0))
+	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)
 	w := httptest.NewRecorder()
@@ -101,6 +107,12 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 	if body["unpricedPositions"] != 0.0 {
 		t.Errorf("expected unpricedPositions 0, got %v", body["unpricedPositions"])
 	}
+	if body["totalPositions"] != 1.0 {
+		t.Errorf("expected totalPositions 1, got %v", body["totalPositions"])
+	}
+	if body["valuationDate"] != "2026-10-28" {
+		t.Errorf("expected valuationDate 2026-10-28, got %v", body["valuationDate"])
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)
@@ -120,6 +132,7 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
 
+	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -127,9 +140,13 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 			"adjusted_quantity",
 		}).AddRow("NEWCO", 10.0))
 
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_portfolio")).
+	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(5000.0))
+		WillReturnRows(sqlmock.NewRows([]string{
+			"total_portfolio_value",
+			"total_positions",
+			"valuation_date",
+		}).AddRow(5000.0, 2, "2026-10-28"))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).
@@ -142,6 +159,7 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
 		}).AddRow(0.0, 0.0, 0.0))
+	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)
 	w := httptest.NewRecorder()
@@ -163,6 +181,9 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 	}
 	if body["unpricedPositions"] != 1.0 {
 		t.Errorf("expected unpricedPositions 1, got %v", body["unpricedPositions"])
+	}
+	if body["totalPositions"] != 2.0 {
+		t.Errorf("expected totalPositions to include the unpriced holding, got %v", body["totalPositions"])
 	}
 	symbols, ok := body["unpricedSymbols"].([]interface{})
 	if !ok || len(symbols) != 1 || symbols[0] != "NEWCO" {

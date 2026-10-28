@@ -26,7 +26,9 @@
   - Event-type fields are constrained: split/bonus events cannot carry merger/delist fields; mergers require a non-blank successor and no delist outcome; delists require an outcome and no successor.
   - There is no corporate-action write API yet; validation is enforced by database constraints and triggers for every write path.
   - `reward_quantity_movements` records the reward's original quantity and each effective-dated adjustment. Only corporate actions after each movement's date are applied, so a post-split or post-merger correction is not multiplied by prior events.
-  - `user_portfolio` and `today_rewards` use movement-derived current balances, the terminal successor symbol, and adjusted prices; `historical_rewards` remains a reward-date point-in-time valuation.
+  - `user_portfolio` and `today_rewards` use movement-derived current balances, the terminal successor symbol, adjusted prices, and `is_active` from the shared outcome view. Handlers must not add their own delist predicates.
+  - `historical_rewards_as_of(as_of)` keeps every historical row. The default grant-date value is never changed by a later delist. With `?asOf=YYYY-MM-DD`, effective quantity, terminal symbol, adjustments, delist status, and price are all evaluated on that date.
+  - A terminal-delisted lot has zero effective quantity in as-of history and `priceStatus: "not_required"`; its `cashProceeds` or `writtenOffQuantity` is still returned. `not_required` is a closed position, not a missing-price gap.
   - Delist filtering resolves the terminal symbol first. A delist on a predecessor after a merger does not remove the successor holding; a delist on the terminal instrument does.
   - A merger may include `cash_per_unit` cash consideration per predecessor share. Cash is calculated when the holding crosses that merger edge and is included in `cashProceeds`.
   - A terminal delist must set `delist_outcome`:
@@ -42,6 +44,7 @@
   - Same-date actions are applied in the order split → bonus → merger → adjustment.
   - Corporate-action cash is posted to `ledger` as positive `inr_outflow` rows tagged with `stock_event_id`; the unique key `(reward_id, stock_event_id)` prevents duplicates. A `stock_events` trigger posts immediately, and `CorporateActionService` processes future-dated events at startup and daily.
   - `reward_corporate_action_outcomes` is the shared per-reward outcome view used by `today_rewards` and `user_portfolio`, so `/portfolio` and `/stats` report the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity`. `totalPortfolioValue` remains stock-only.
+  - `/portfolio` and `/stats` read inside one read-only `REPEATABLE READ` transaction. `totalPortfolioValue`, `totalPositions`, and `valuationDate` are full-set aggregates independent of pagination and describe the same snapshot as the returned page.
   - Reconciliation keeps corporate-action cash separate from adjustment cash and compares derived cash with tagged ledger postings through `corporate_action_cash_matches`.
   - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, duplicate delists, blank symbols, non-positive ratios, no-op 1:1 splits, non-forward bonuses, non-1:1 delists, and case/whitespace/same-day duplicate events.
 
@@ -63,9 +66,10 @@
 
 - **Problem:** Historical INR values depend on `stock_price_history`, and a missing row used to hide the reward entirely.
 - **Handling:**
-  - `historical_rewards` left-joins rewards to `stock_price_history_adjusted` by reward date.
+  - `historical_rewards_as_of(as_of)` left-joins each reward to `stock_price_history_adjusted` using the reward date by default, or the requested `asOf` date.
   - A reward with no history row remains visible with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`.
-  - `/historical-inr` returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's full historical set so clients can detect incomplete totals.
+  - A zero effective quantity (terminal delist or full reversal) reports `priceStatus: "not_required"` with `inrValue: 0`; it is not counted as a missing-price gap.
+  - `/historical-inr` returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's full set at the same grant-date or `asOf` reference so clients can detect incomplete totals.
   - The background price service inserts or updates a daily history row on every cycle, including when the price is unchanged.
   - Missing dates can be seeded through `SELECT backfill_price_history('YYYY-MM-DD');`, which inserts missing rows from the latest `stock_prices` values.
   - Real historical prices should be imported from an authoritative source; the backfill function is a local/demo convenience and does not fabricate multiple days automatically.

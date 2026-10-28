@@ -82,6 +82,11 @@ type HistoricalINR struct {
 	INRValue              *float64   `json:"inrValue"`
 	PriceStatus           string     `json:"priceStatus"`
 	PriceAsOf             *time.Time `json:"priceAsOf"`
+	OutcomeType           string     `json:"outcomeType"`
+	IsActive              bool       `json:"isActive"`
+	DelistEffectiveDate   *string    `json:"delistEffectiveDate"`
+	CashProceeds          float64    `json:"cashProceeds"`
+	WrittenOffQuantity    float64    `json:"writtenOffQuantity"`
 }
 
 type TodayReward struct {

@@ -25,7 +25,7 @@ func TestGetUserCorporateActionCash_ReturnsOutcome(t *testing.T) {
 			"cash_in_lieu_proceeds",
 		}).AddRow(1250.5, 12.25, 250.5))
 
-	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(7)
+	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(db, 7)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestGetUserCorporateActionCash_NoRows(t *testing.T) {
 		WithArgs(8).
 		WillReturnError(sql.ErrNoRows)
 
-	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(8)
+	cash, writtenOff, cashInLieu, err := handler.getUserCorporateActionCash(db, 8)
 	if err != nil {
 		t.Fatalf("expected no error for missing outcome row, got %v", err)
 	}

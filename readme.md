@@ -45,7 +45,7 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 | POST   | `/api/v1/reward`                 | Create a reward entry.                     |
 | POST   | `/api/v1/adjustments/:id`        | Apply adjustment to a reward.              |
 | GET    | `/api/v1/today-stocks/:userId`   | Fetch today's rewards with adjustments.    |
-| GET    | `/api/v1/historical-inr/:userId` | Get historical INR valuation before today. |
+| GET    | `/api/v1/historical-inr/:userId` | Get historical INR valuation; supports `?asOf=YYYY-MM-DD`. |
 | GET    | `/api/v1/stats/:userId`          | Get today's rewards and portfolio value.   |
 | GET    | `/api/v1/portfolio/:userId`      | Get portfolio details per stock.           |
 
@@ -55,6 +55,7 @@ The historical INR and portfolio endpoints support `limit` and `offset` query pa
 
 ```text
 GET /api/v1/historical-inr/:userId?limit=100&offset=0
+GET /api/v1/historical-inr/:userId?asOf=2026-10-01&limit=100&offset=0
 GET /api/v1/portfolio/:userId?limit=100&offset=0
 ```
 
@@ -63,6 +64,9 @@ GET /api/v1/portfolio/:userId?limit=100&offset=0
 - `offset` defaults to `0`.
 - `limit` must be a positive integer.
 - `offset` must be zero or a positive integer.
+- `asOf` is optional and must be an ISO date (`YYYY-MM-DD`). Future dates are rejected.
+
+`/historical-inr` defaults to **grant-date** valuation: each reward uses its original quantity and the adjusted reward-date price. With `asOf`, the same rows are revalued **as of that date**: effective-dated quantity, terminal successor symbol, adjustments, delist status, and price history are all evaluated on `asOf`. A lot delisted on or before `asOf` has quantity `0`, `priceStatus: "not_required"`, and reports its `cashProceeds` or `writtenOffQuantity`. A later delist never removes a historical row or changes its grant-date value.
 
 Historical INR results are returned newest first with stable ordering:
 
@@ -77,6 +81,9 @@ Example response:
   "userId": 1,
   "limit": 100,
   "offset": 0,
+  "valuationMode": "grant_date",
+  "valuationDate": "2026-10-28",
+  "asOf": null,
   "history": [
     {
       "rewardDate": "2026-10-27",
@@ -87,7 +94,12 @@ Example response:
       "totalAdjustmentAmount": 0,
       "inrValue": null,
       "priceStatus": "missing",
-      "priceAsOf": null
+      "priceAsOf": null,
+      "outcomeType": "active",
+      "isActive": true,
+      "delistEffectiveDate": null,
+      "cashProceeds": 0,
+      "writtenOffQuantity": 0
     }
   ],
   "valuationComplete": false,
@@ -95,6 +107,8 @@ Example response:
   "unpricedSymbols": ["NEWCO"]
 }
 ```
+
+`valuationMode` is `"grant_date"` or `"as_of"`. `valuationDate` is the database date used for current lifecycle annotations in grant-date mode, or the requested `asOf` date in as-of mode. `outcomeType` is `active`, `cash_exit`, or `write_off`; `isActive` says whether the lot is still held; `delistEffectiveDate`, `cashProceeds`, and `writtenOffQuantity` expose the terminal outcome without hiding the historical row.
 
 Portfolio responses use the same pagination metadata:
 
@@ -104,6 +118,9 @@ Portfolio responses use the same pagination metadata:
   "limit": 100,
   "offset": 0,
   "portfolio": [],
+  "totalPortfolioValue": 0,
+  "totalPositions": 0,
+  "valuationDate": "2026-10-28",
   "valuationComplete": true,
   "unpricedPositions": 0,
   "unpricedSymbols": [],
@@ -113,15 +130,17 @@ Portfolio responses use the same pagination metadata:
 }
 ```
 
+`totalPortfolioValue` is the full-set stock value and sums only holdings with an available current price. `totalPositions` counts every active holding, including unpriced ones. `valuationDate` is the database date used by the shared reporting views. `/portfolio` and `/stats` read the same `user_portfolio` view inside one read-only `REPEATABLE READ` snapshot, so their totals and position counts describe the same valuation date and MVCC state.
+
 `cashProceeds` is the total cash received from merger consideration, cash-in-lieu fraction settlement, and cash-exit delistings. `cashInLieuProceeds` is the subset produced by fractional-share settlement. `writtenOffQuantity` is the quantity removed by write-off delistings. All three are zero when the user has no terminal corporate-action outcomes.
 
 A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the price row's last update timestamp.
 
 `/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`.
 
-Historical rewards use the same explicit-gap rule. When `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete historical set, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp.
+Historical rewards use the same explicit-gap rule. In grant-date mode, when `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. With `asOf`, the price is looked up on that date instead. `priceStatus` is `"not_required"` when the effective quantity is zero (for example after a terminal delist or a full reversal); that is a closed position, not a valuation gap. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete set at the same grant-date or `asOf` reference, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp.
 
-`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
+`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, the full-set `totalPositions`, `valuationDate`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals as `/portfolio`. Its reads run in the same read-only snapshot, so `/stats` and `/portfolio` agree on the active symbol set, total value, position count, and valuation date. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
 
 ---
 
@@ -141,11 +160,13 @@ The project uses PostgreSQL with the following main tables and views:
 - `stock_price_history_adjusted` (VIEW): Raw historical prices with point-in-time split/bonus factors applied.
 - `reward_quantity_movements` (VIEW): Original and adjustment quantity movements normalized to reward-date units.
 - `reward_current_balances` (VIEW): Movement-derived current settled quantity per reward.
-- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity.
+- `reward_corporate_action_outcomes` (VIEW): Per-reward terminal outcome, total cash proceeds, cash-in-lieu proceeds, fraction quantity, and written-off quantity, evaluated at `CURRENT_DATE`.
+- `reward_corporate_action_outcome` (FUNCTION): Parameterized `(reward_id, as_of)` lifecycle/outcome for historical snapshots.
 - `user_corporate_action_cash` (VIEW): Per-user totals of corporate-action cash, cash-in-lieu proceeds, and written-off quantity.
-- `today_rewards` (VIEW): Today's reward values with explicit current-price status.
-- `historical_rewards` (VIEW): Historical reward values with explicit reward-date price status.
-- `user_portfolio` (VIEW): Aggregated current portfolio holdings, including holdings whose current price is missing.
+- `today_rewards` (VIEW): Today's reward values with explicit current-price status; terminal-delisted rewards are excluded.
+- `historical_rewards_as_of` (FUNCTION): Grant-date or as-of historical valuation with lifecycle annotations.
+- `historical_rewards` (VIEW): Backward-compatible grant-date mode of `historical_rewards_as_of`.
+- `user_portfolio` (VIEW): Aggregated current active holdings, including holdings whose current price is missing; terminal-delisted holdings are excluded.
 - `reward_ledger_reconciliation` (VIEW): Per-reward stock, cash, adjustment, and fee reconciliation.
 
 ### Key Relationships
@@ -185,8 +206,8 @@ The project uses PostgreSQL with the following main tables and views:
   Settlement is applied per reward lot, not across an aggregated user position, matching the reward-scoped ledger. Merger `cash_per_unit` consideration is calculated on the pre-merger quantity and is not reduced by cash-in-lieu flooring. A delist cannot use `cash_in_lieu`; use `cash_exit` for a cash-only exit. Same-date actions are applied in the order split → bonus → merger → adjustment.
 - Corporate-action cash is posted physically to `ledger` as positive `inr_outflow` rows tagged with `ledger.stock_event_id`. The unique key `(reward_id, stock_event_id)` makes posting idempotent. An `AFTER` statement trigger on `stock_events` posts immediately, and the background `CorporateActionService` runs at startup and daily to post future-dated events when they become effective. `process_corporate_action_cash(as_of)` updates or removes stale postings when events change.
 - `reward_ledger_reconciliation` excludes corporate-action cash from adjustment-cash reconciliation and compares derived corporate-action cash with the tagged ledger postings through `corporate_action_cash_matches`.
-- `reward_corporate_action_outcomes` is the shared per-reward outcome source for `today_rewards` and `user_portfolio`; `/portfolio` and `/stats` therefore return the same cash and write-off totals. `totalPortfolioValue` remains stock-value-only.
-- `historical_rewards` is a reward-date point-in-time valuation using the original quantity and the adjusted reward-date price. Missing reward-date prices remain visible with `price_status = 'missing'` and null `price`/`inr_value`.
+- `reward_corporate_action_outcomes` is the single successor-aware outcome source for `today_rewards`, `user_portfolio`, and `user_corporate_action_cash`. A terminal delist removes the holding from active reporting; a predecessor delist after a merger does not. Handlers must not add their own delist predicates, so `/portfolio`, `/stats`, and `/today-stocks` cannot drift apart. `/portfolio` and `/stats` therefore return the same cash and write-off totals, total value, position count, and valuation date. `totalPortfolioValue` remains stock-value-only.
+- `reward_corporate_action_outcome(reward_id, as_of)` generalizes the same outcome logic to an arbitrary date for historical snapshots. `historical_rewards_as_of(as_of)` uses it to value each reward at grant date (`as_of IS NULL`) or as of a requested date. Grant-date mode uses the original quantity and the adjusted reward-date price; as-of mode uses effective-dated quantity, terminal symbol, adjustments, delists, and price. A later delist never removes a historical row or changes its grant-date value. Zero-quantity rows use `price_status = 'not_required'` instead of being reported as valuation gaps. Missing prices remain visible with `price_status = 'missing'` and null `price`/`inr_value`.
 - Adjustments take effect on `adjustments.effective_date` (currently the creation date). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
 - `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
 
