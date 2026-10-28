@@ -192,13 +192,23 @@ Timestamp and date columns are deliberately typed:
 
 Migration `0022_business_date_timezone_semantics` interprets legacy `TIMESTAMP` values as IST wall-clock time (`AT TIME ZONE 'Asia/Kolkata'`), so existing business dates do not move. The boundary behavior is covered by `internal/database/timezone_integration_test.go`, which runs the migrations against a disposable database under `UTC`, `Asia/Kolkata`, `America/Los_Angeles`, and `Pacific/Kiritimati` when `TEST_DATABASE_URL` is set.
 
+### Instrument symbol normalization
+
+Migration `0023_case_normalized_instruments` makes instrument symbols canonical across the whole valuation path. `normalize_instrument_symbol(text)` returns `UPPER(BTRIM(text, E' \t\n\r'))`, and the same rule is implemented by `utils.NormalizeStockSymbol` in Go.
+
+- `stock_prices`, `stock_price_history`, `rewards`, `ledger`, and `stock_events` store only canonical symbols. `BEFORE INSERT OR UPDATE` triggers normalize new writes, and `CHECK` constraints reject non-canonical values if a trigger is bypassed.
+- Functional unique indexes enforce one current price, one daily history row per date, and one reward per user/symbol/market date after normalization. `stock_events` keeps its existing normalized unique index.
+- Valuation, lineage, settlement, and reconciliation joins use exact canonical equality, so `AAPL` and `aapl` cannot multiply rows. Reward creation also looks up the price with an exact symbol match and a deterministic `updated_at DESC, id DESC` tie-break.
+- Migration `0023` resolves existing `stock_prices` / `stock_price_history` case variants by keeping the latest row (`updated_at` / `created_at`). It aborts instead of deleting if `rewards` or `stock_events` contain normalized duplicates, because those are financial/audit records (and event deletion cascades to ledger postings).
+- The data normalization is one-way; the down migration restores the previous schema behavior but cannot restore original casing.
+
 ### Corporate actions and adjustment timing
 
 - Raw prices remain in `stock_prices` and `stock_price_history`. Split/bonus factors are applied by the adjusted views, never written back.
 - A 2:1 forward split or 1:1 bonus uses ratio `2/1`; a 1:5 reverse split uses `1/5`. Only `split` and `bonus` events affect prices.
 - Merger lineage is resolved recursively. A reward in A follows A→B→C, composing every merger ratio and applying split/bonus events only while the holding is in each successor instrument.
 - Merger events must have a distinct successor and positive ratios. A database trigger rejects lineage cycles, and each predecessor may have only one merge event.
-- Corporate-action symbols are trimmed and uppercased before storage. A unique index on normalized symbol, event type, and effective date rejects case, whitespace, and same-day duplicate events.
+- Instrument and corporate-action symbols are trimmed and uppercased before storage. A unique index on normalized symbol, event type, and effective date rejects case, whitespace, and same-day duplicate events. Migration `0023` applies the same canonical representation and uniqueness to current prices, price history, and rewards.
 - Event ratios are validated: split ratios must be positive and not 1:1; bonus ratios must be greater than 1:1; merger ratios must be positive; delist ratios are normalized to 1:1. Event-type fields are constrained so split/bonus events cannot carry merger/delist fields, mergers require a non-blank successor and cannot carry a delist outcome, and delists require an outcome and cannot carry a successor.
 - There is no corporate-action write API yet; these rules are enforced by database constraints and triggers for every write path.
 - Delist filtering resolves the terminal successor first. A predecessor delisting after a merger does not remove the valid successor holding; a delisting of the terminal instrument does.
@@ -404,7 +414,7 @@ The function only inserts symbol/date pairs that have no history row and returns
 
 - **Duplicate rewards** - Prevented with same-day uniqueness and idempotency handling.
 - **Missing idempotency key** - Stored as SQL `NULL`; API scans it back as an empty string when returning inserted rows.
-- **Stock symbol casing** - Reward creation normalizes symbols with trimming and uppercase conversion.
+- **Stock symbol casing** - All instrument symbols (current prices, price history, rewards, ledger, and stock events) are trimmed and uppercased at write time. Normalized uniqueness and exact canonical joins prevent case variants from duplicating rows, multiplying valuations, or making price lookup nondeterministic.
 - **Stock events** - Views account for splits, bonus issues, mergers, and delisting, including merger cash consideration, terminal cash-exit/write-off outcomes, and per-event fractional-share settlement.
 - **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
 - **Negative quantities after adjustment** - Prevented by transactional validation.

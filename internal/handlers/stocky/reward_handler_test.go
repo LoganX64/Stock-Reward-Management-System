@@ -206,7 +206,7 @@ func TestCreateReward_NormalizesStockSymbol(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT adjusted_price FROM stock_prices_adjusted WHERE UPPER(stock_symbol) = UPPER($1)")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT adjusted_price FROM stock_prices_adjusted WHERE stock_symbol = $1 ORDER BY updated_at DESC, id DESC LIMIT 1")).
 		WithArgs("TCS").
 		WillReturnRows(sqlmock.NewRows([]string{"adjusted_price"}).AddRow(100.0))
 	mock.ExpectExec("SAVEPOINT reward_insert").
@@ -279,7 +279,7 @@ func TestCreateReward_IdempotentRetryWinsOverDateConstraint(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT adjusted_price FROM stock_prices_adjusted WHERE UPPER(stock_symbol) = UPPER($1)")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT adjusted_price FROM stock_prices_adjusted WHERE stock_symbol = $1 ORDER BY updated_at DESC, id DESC LIMIT 1")).
 		WithArgs("TCS").
 		WillReturnRows(sqlmock.NewRows([]string{"adjusted_price"}).AddRow(100.0))
 	mock.ExpectExec("SAVEPOINT reward_insert").

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
@@ -27,7 +26,7 @@ type CreateRewardRequest struct {
 
 // InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
 func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql.Result, error) {
-	req.StockSymbol = normalizeStockSymbol(req.StockSymbol)
+	req.StockSymbol = utils.NormalizeStockSymbol(req.StockSymbol)
 
 	// Use sql.NullString so the driver writes SQL NULL when the key is empty.
 	var idemp sql.NullString
@@ -41,10 +40,6 @@ func InsertReward(ctx context.Context, db *sql.DB, req CreateRewardRequest) (sql
         VALUES ($1, $2, $3, NULLIF($4, ''), NOW())`
 
 	return db.ExecContext(ctx, insertSQL, req.UserID, req.StockSymbol, req.Quantity, idemp)
-}
-
-func normalizeStockSymbol(symbol string) string {
-	return strings.ToUpper(strings.TrimSpace(symbol))
 }
 
 func (h *Handler) CreateReward(c *gin.Context) {
@@ -62,7 +57,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
 		return
 	}
-	req.StockSymbol = normalizeStockSymbol(req.StockSymbol)
+	req.StockSymbol = utils.NormalizeStockSymbol(req.StockSymbol)
 	if req.StockSymbol == "" {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("stock_symbol is required"))
 		return
@@ -105,9 +100,11 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 
-	// Fetch current split/bonus-adjusted price
+	// Fetch the current split/bonus-adjusted price. Symbols are stored and
+	// looked up canonically; the ordering keeps the lookup deterministic even if
+	// a legacy duplicate somehow reaches the view.
 	var currentPrice float64
-	if err := tx.QueryRowContext(ctx, `SELECT adjusted_price FROM stock_prices_adjusted WHERE UPPER(stock_symbol) = UPPER($1)`, req.StockSymbol).Scan(&currentPrice); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT adjusted_price FROM stock_prices_adjusted WHERE stock_symbol = $1 ORDER BY updated_at DESC, id DESC LIMIT 1`, req.StockSymbol).Scan(&currentPrice); err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Stock symbol not found"))
 			return
@@ -180,7 +177,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 				}
 
 				if err == nil {
-					if reward.User_ID != req.UserID || normalizeStockSymbol(reward.Stock_Symbol) != req.StockSymbol || reward.Quantity != req.Quantity {
+					if reward.User_ID != req.UserID || utils.NormalizeStockSymbol(reward.Stock_Symbol) != req.StockSymbol || reward.Quantity != req.Quantity {
 						response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
 						return
 					}

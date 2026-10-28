@@ -308,6 +308,7 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 // =======================
 
 func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
+	job.Symbol = utils.NormalizeStockSymbol(job.Symbol)
 	log := logrus.WithField("symbol", job.Symbol)
 
 	newPrice, fetchErr := s.fetcher.GetLatestPrice(job.Symbol, job.OldPrice)
@@ -381,6 +382,7 @@ func (s *PriceService) querySymbolPrices(ctx context.Context) ([]PriceJob, error
 			logrus.WithError(err).Warn("Skipping malformed row in stock_prices")
 			continue
 		}
+		e.Symbol = utils.NormalizeStockSymbol(e.Symbol)
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {

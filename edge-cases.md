@@ -7,7 +7,7 @@
   - `idempotency_key` is optional and client-provided.
   - Empty idempotency keys are stored as SQL `NULL`.
   - Rewards are constrained by `(user_id, stock_symbol, reward_date)` to prevent multiple same-day rewards for the same user and stock. “Same day” means the market date in `Asia/Kolkata`, not the database session date.
-  - A case-insensitive unique index also protects `(user_id, UPPER(stock_symbol), reward_date)`.
+  - A normalized unique index protects `(user_id, normalize_instrument_symbol(stock_symbol), reward_date)`; symbols are trimmed and uppercased by a trigger and a canonical-value check constraint.
   - If a duplicate insert occurs with a matching `idempotency_key`, the API fetches the existing reward and returns an idempotent replay response.
   - If the same `idempotency_key` is reused with a different payload, the API returns a conflict.
 
@@ -22,6 +22,7 @@
   - Split/bonus events on B or C apply only while the holding is in that instrument. An event after the holding has moved to the next successor is ignored.
   - Merger events require a distinct successor and positive ratios. A trigger rejects lineage cycles, and each predecessor may have only one merge event.
   - Corporate-action symbols are trimmed and uppercased before storage. A unique index on normalized symbol, event type, and effective date rejects case, whitespace, and same-day duplicate events.
+  - The same canonical representation is enforced across `stock_prices`, `stock_price_history`, `rewards`, and `ledger` by migration `0023_case_normalized_instruments`. See “Case normalization across instruments” below.
   - Ratios are validated: split ratios are positive and not 1:1; bonus ratios are greater than 1:1; merger ratios are positive; delist ratios are normalized to 1:1.
   - Event-type fields are constrained: split/bonus events cannot carry merger/delist fields; mergers require a non-blank successor and no delist outcome; delists require an outcome and no successor.
   - There is no corporate-action write API yet; validation is enforced by database constraints and triggers for every write path.
@@ -47,6 +48,17 @@
   - `/portfolio` and `/stats` read inside one read-only `REPEATABLE READ` transaction. `totalPortfolioValue`, `totalPositions`, and `valuationDate` are full-set aggregates independent of pagination and describe the same snapshot as the returned page.
   - Reconciliation keeps corporate-action cash separate from adjustment cash and compares derived cash with tagged ledger postings through `corporate_action_cash_matches`.
   - Validation rejects merges without successors, negative cash, cash exits without cash, write-offs with cash, delists before mergers, duplicate delists, blank symbols, non-positive ratios, no-op 1:1 splits, non-forward bonuses, non-1:1 delists, and case/whitespace/same-day duplicate events.
+
+### Case normalization across instruments
+
+- **Problem:** PostgreSQL string uniqueness is case-sensitive. Without a shared canonical form, `TCS`, `tcs`, and ` TCS ` can coexist in prices, price history, rewards, or ledger rows. Joins using `UPPER(...)` can then multiply valuation rows, and a reward price lookup can choose an arbitrary duplicate.
+- **Handling:**
+  - `normalize_instrument_symbol(text)` defines the canonical form as `UPPER(BTRIM(text, E' \t\n\r'))`; Go uses the matching `utils.NormalizeStockSymbol`.
+  - `stock_prices`, `stock_price_history`, `rewards`, `ledger`, and `stock_events` store canonical symbols. `BEFORE INSERT OR UPDATE` triggers normalize writes, and `CHECK` constraints reject non-canonical stored values if a trigger is bypassed.
+  - Normalized functional unique indexes enforce one current price per symbol, one history row per symbol and date, and one reward per user/symbol/market date. `stock_events` keeps its normalized unique index.
+  - Valuation, lineage, settlement, and reconciliation joins use exact canonical equality. Reward creation uses an exact canonical price lookup with a deterministic `updated_at DESC, id DESC` tie-break.
+  - Existing `stock_prices` and `stock_price_history` variants are resolved by keeping the row with the latest `updated_at` or `created_at` (then the canonical row, then the highest id). The migration aborts if `rewards` or `stock_events` contain normalized duplicates; it never deletes financial/audit rows or cascades event deletion into ledger postings.
+  - The migration normalizes data one-way. The down migration restores the previous schema behavior but does not restore original casing or whitespace.
 
 ## 3. Missing Current and Historical Prices
 

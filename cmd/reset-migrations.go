@@ -17,6 +17,8 @@ func main() {
 
 	// Drop all views and corporate-action functions first
 	dropViews := `
+		DROP FUNCTION IF EXISTS normalize_instrument_symbol_trigger() CASCADE;
+		DROP FUNCTION IF EXISTS normalize_instrument_symbol(TEXT) CASCADE;
 		DROP FUNCTION IF EXISTS historical_rewards_as_of(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_corporate_action_outcome(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS backfill_price_history(DATE) CASCADE;
