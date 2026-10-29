@@ -8,6 +8,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
@@ -63,8 +64,8 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	for rows.Next() {
 
 		var item models.PortfolioItem
-		var currentPrice sql.NullFloat64
-		var inrValue sql.NullFloat64
+		var currentPrice decimal.NullDecimal
+		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
 		if err := rows.Scan(
 			&item.StockSymbol,
@@ -83,12 +84,10 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		// prices.
 		item.Quantity = utils.RoundQuantity(item.Quantity)
 		if currentPrice.Valid {
-			v := utils.RoundAmount(currentPrice.Float64)
-			item.CurrentPrice = &v
+			item.CurrentPrice = decimal.NullDecimal{Decimal: utils.RoundAmount(currentPrice.Decimal), Valid: true}
 		}
 		if inrValue.Valid {
-			v := utils.RoundAmount(inrValue.Float64)
-			item.INRValue = &v
+			item.INRValue = decimal.NullDecimal{Decimal: utils.RoundAmount(inrValue.Decimal), Valid: true}
 		}
 		if priceAsOf.Valid {
 			t := priceAsOf.Time.UTC()

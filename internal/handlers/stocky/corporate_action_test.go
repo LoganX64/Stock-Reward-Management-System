@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/shopspring/decimal"
 )
 
 func TestGetUserCorporateActionCash_ReturnsOutcome(t *testing.T) {
@@ -29,13 +30,13 @@ func TestGetUserCorporateActionCash_ReturnsOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cash != 1250.5 {
+	if !cash.Equal(decimal.RequireFromString("1250.5")) {
 		t.Errorf("expected cash 1250.5, got %v", cash)
 	}
-	if writtenOff != 12.25 {
+	if !writtenOff.Equal(decimal.RequireFromString("12.25")) {
 		t.Errorf("expected written-off quantity 12.25, got %v", writtenOff)
 	}
-	if cashInLieu != 250.5 {
+	if !cashInLieu.Equal(decimal.RequireFromString("250.5")) {
 		t.Errorf("expected cash-in-lieu 250.5, got %v", cashInLieu)
 	}
 
@@ -61,7 +62,7 @@ func TestGetUserCorporateActionCash_NoRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing outcome row, got %v", err)
 	}
-	if cash != 0 || writtenOff != 0 || cashInLieu != 0 {
+	if !cash.IsZero() || !writtenOff.IsZero() || !cashInLieu.IsZero() {
 		t.Errorf("expected zero values for missing outcome row, got %v/%v/%v", cash, writtenOff, cashInLieu)
 	}
 }

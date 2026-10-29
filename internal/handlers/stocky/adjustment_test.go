@@ -10,6 +10,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/LoganX64/stocky-api/internal/storage/models"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 )
 
 func setupRouter() *gin.Engine {
@@ -93,7 +94,7 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(5.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
-		WithArgs(1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "").
+		WithArgs(1, models.Reward_Reversal, decimal.NewFromInt(-1), decimal.NewFromInt(100), "reversal refund", "").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id",
 			"reward_id",
@@ -106,13 +107,13 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 			"created_at",
 		}).AddRow(1, 1, models.Reward_Reversal, -1.0, 100.0, "reversal refund", "", "2026-05-28", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC)))
 	mock.ExpectExec("UPDATE rewards").
-		WithArgs(4.0, 1).
+		WithArgs(decimal.NewFromInt(4), 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger").
-		WithArgs(1, models.StockUnits, "TCS", -1.0, 0.0).
+		WithArgs(1, models.StockUnits, "TCS", decimal.NewFromInt(-1), decimal.Zero).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO ledger").
-		WithArgs(1, models.INROutflow, "", 0.0, 100.0).
+		WithArgs(1, models.INROutflow, "", decimal.Zero, decimal.NewFromInt(100)).
 		WillReturnResult(sqlmock.NewResult(2, 1))
 	mock.ExpectExec("UPDATE adjustments SET original_response").
 		WithArgs(sqlmock.AnyArg(), 1).
@@ -161,7 +162,7 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(10.0))
 	mock.ExpectQuery("INSERT INTO adjustments").
-		WithArgs(1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "").
+		WithArgs(1, models.Manual_Correction, decimal.NewFromInt(2), decimal.Zero, "post-split correction", "").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id",
 			"reward_id",
@@ -174,10 +175,10 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 			"created_at",
 		}).AddRow(2, 1, models.Manual_Correction, 2.0, 0.0, "post-split correction", "", "2026-05-28", time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC)))
 	mock.ExpectExec("UPDATE rewards").
-		WithArgs(6.0, 1).
+		WithArgs(decimal.NewFromInt(6), 1).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO ledger").
-		WithArgs(1, models.StockUnits, "TCS", 2.0, 0.0).
+		WithArgs(1, models.StockUnits, "TCS", decimal.NewFromInt(2), decimal.Zero).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE adjustments SET original_response").
 		WithArgs(sqlmock.AnyArg(), 2).

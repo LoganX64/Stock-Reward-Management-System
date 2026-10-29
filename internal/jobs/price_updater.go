@@ -85,10 +85,10 @@ func (r *RandomPriceFetcher) effectiveFallbackFactor() float64 {
 func (r *RandomPriceFetcher) GetLatestPrice(symbol string, lastPrice float64) (float64, error) {
 	if rand.Float64() < 0.1 {
 		f := r.effectiveFallbackFactor()
-		dampened := utils.RoundAmount(lastPrice * (1.0 - f + rand.Float64()*(2*f)))
+		dampened := utils.RoundAmountFloat(lastPrice * (1.0 - f + rand.Float64()*(2*f)))
 		return dampened, fmt.Errorf("price fetch failed for %s: using dampened fallback", symbol)
 	}
-	return utils.RoundAmount(lastPrice * (0.95 + rand.Float64()*0.10)), nil
+	return utils.RoundAmountFloat(lastPrice * (0.95 + rand.Float64()*0.10)), nil
 }
 
 // =======================
@@ -351,7 +351,7 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 		log.WithFields(logrus.Fields{
 			"old_price": job.OldPrice,
 			"new_price": newPrice,
-			"change":    utils.RoundAmount(newPrice - job.OldPrice),
+			"change":    utils.RoundAmountFloat(newPrice - job.OldPrice),
 		}).Info("Price updated successfully")
 	} else {
 		log.WithField("price", newPrice).Debug("Price unchanged, recording daily history")

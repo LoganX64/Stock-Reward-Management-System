@@ -88,11 +88,16 @@
 
 ## 4. Rounding Errors in INR Valuation
 
-- **Problem:** Floating-point calculations can introduce small precision differences.
+- **Problem:** Floating-point calculations can introduce small precision differences, especially at half-way rounding boundaries and when PostgreSQL `NUMERIC` values are converted to `float64`.
 - **Handling:**
-  - `RoundQuantity` rounds quantities to 6 decimal places.
-  - `RoundAmount` rounds INR amounts to 4 decimal places.
-  - Handlers round quantities, prices, INR values, and ledger amounts before returning or inserting values.
+  - Quantities are stored to 6 decimal places; INR amounts and prices are stored to 4 decimal places.
+  - The reward write path uses `shopspring/decimal` for request decoding, database reads, notional and fee calculations, ledger inserts, and JSON output. Database `NUMERIC` values are not converted through `float64` before storage.
+  - `RoundQuantity` rounds quantities to 6 decimal places and `RoundAmount` rounds INR amounts to 4 decimal places. Both use half-away-from-zero rounding, matching PostgreSQL `ROUND(numeric, scale)`.
+  - Fee components are rounded at each step: notional first, then brokerage and STT, then GST on the rounded brokerage + STT, then the fee total. See the worked examples in `readme.md`.
+  - Reward responses and ledger rows use the same rounded values. The notional is posted as `-notional` in `inr_outflow`; fees are negative `brokerage_fee`, `stt_fee`, and `gst_fee` rows.
+  - The fee schedule is a simplified buy-side model: 0.5% brokerage, 0.1% STT, and 18% GST on brokerage + STT. It excludes sell-side STT, exchange/SEBI charges, stamp duty, DP charges, minimum brokerage, and the full statutory GST base. The user is assumed to bear the fees.
+  - A `reward_reversal` or `fee_refund` does not automatically recompute the original fee schedule. Explicit cash-only corrections use the adjustment API and do not change the holding's valuation.
+  - The simulated price updater is the only float-based path. It rounds generated prices to 4 decimal places before writing them, and it is explicitly a local/demo data source rather than financial accounting.
 
 ## 5. Simulated Price Updates and Stale Data
 
@@ -162,7 +167,7 @@ This system handles:
 1. Duplicate rewards and idempotent retries.
 2. Stock events and delisting behavior.
 3. Missing historical price data as an explicit reporting status with supported backfill.
-4. Consistent rounding for quantities and INR values.
+4. Decimal-safe fee calculations and consistent rounding for quantities and INR values.
 5. Simulated price update failures.
 6. Transactional reward adjustments.
 7. Explicit market-date and timezone semantics for rewards, corporate actions, price history, and historical snapshots.

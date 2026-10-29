@@ -15,6 +15,7 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 - **golang-migrate** - Database migration tool
 - **logrus** - Structured logging
 - **lib/pq** - PostgreSQL driver
+- **shopspring/decimal** - Exact decimal arithmetic for quantities, money, and fees
 - **go-sqlmock** - Handler/unit test database mocking
 
 ### Key Features
@@ -201,6 +202,48 @@ Migration `0023_case_normalized_instruments` makes instrument symbols canonical 
 - Valuation, lineage, settlement, and reconciliation joins use exact canonical equality, so `AAPL` and `aapl` cannot multiply rows. Reward creation also looks up the price with an exact symbol match and a deterministic `updated_at DESC, id DESC` tie-break.
 - Migration `0023` resolves existing `stock_prices` / `stock_price_history` case variants by keeping the latest row (`updated_at` / `created_at`). It aborts instead of deleting if `rewards` or `stock_events` contain normalized duplicates, because those are financial/audit records (and event deletion cascades to ledger postings).
 - The data normalization is one-way; the down migration restores the previous schema behavior but cannot restore original casing.
+
+### Fee assumptions, precision, and rounding
+
+Stocky uses exact decimal arithmetic for the financial write path. Requests, PostgreSQL `NUMERIC` reads, notional and fee calculations, ledger values, and JSON responses all use `shopspring/decimal`; quantities and amounts are not converted through `float64` before they are stored. The simulated price updater is the only exception: its random walk uses `float64`, but the resulting price is rounded to 4 decimal places before storage.
+
+**Storage precision**
+
+- Quantities: `NUMERIC(18,6)` — 6 decimal places.
+- INR amounts and stored prices: `NUMERIC(18,4)` — 4 decimal places.
+- Split/bonus-adjusted prices can carry PostgreSQL division precision at read time; the resulting notional is rounded once to 4 decimal places.
+- Rounding mode is **half away from zero**, matching PostgreSQL `ROUND(numeric, scale)`.
+
+**Rounding points and fee formulas**
+
+1. Round the requested quantity to 6 decimal places and reject it if it is not positive.
+2. Calculate the notional and round it to 4 decimal places:
+   `notional = ROUND4(adjusted_price × quantity)`
+3. Round each fee component at its own step:
+   - `brokerage = ROUND4(notional × 0.005)` — 0.5% of notional.
+   - `stt = ROUND4(notional × 0.001)` — 0.1% of notional.
+   - `gst = ROUND4((brokerage + stt) × 0.18)` — 18% of the **already-rounded** brokerage and STT.
+   - `fee_total = ROUND4(brokerage + stt + gst)`.
+4. Persist and return the same rounded values. The `inr_outflow` ledger row is `-notional`; fee rows are `-brokerage`, `-stt`, and `-gst`. A `fee_refund` posts a positive `inr_outflow` adjustment and does not change the holding quantity or its valuation; a `manual_correction` posts its signed quantity and cash deltas.
+
+**Fee model assumptions and exclusions**
+
+- The fee schedule is a simplified **buy-side** example for a reward treated as a market purchase: 0.5% brokerage, 0.1% STT, and 18% GST on brokerage + STT.
+- The user is assumed to bear the fees. A free grant or company-borne transaction may have no buy-side fees, but Stocky does not model that distinction.
+- The model does **not** include sell-side STT, exchange transaction charges, SEBI turnover fees, stamp duty, DP charges, minimum brokerage, or a configurable fee schedule.
+- GST is intentionally calculated on brokerage + STT in this MVP. That is not the full statutory Indian GST base.
+- Reversals do not automatically refund fees. Use a `fee_refund` adjustment for an explicit fee refund.
+- Adjustment deltas are rounded to 6 quantity / 4 amount decimal places before validation. Quantity deltas are normalized through corporate-action factors in PostgreSQL `NUMERIC` arithmetic.
+
+**Worked examples**
+
+| Stored price | Quantity | Raw notional | Rounded notional | Brokerage | STT | GST | Fee total |
+|---|---|---|---|---|---|---|---|
+| `100.0000` | `2.000000` | `200` | `200.0000` | `1.0000` | `0.2000` | `0.2160` | `1.4160` |
+| `0.0003` | `0.500000` | `0.00015` | `0.0002` | `0.0000` | `0.0000` | `0.0000` | `0.0000` |
+| `4.0001` | `0.500000` | `2.00005` | `2.0001` | `0.0100` | `0.0020` | `0.0022` | `0.0142` |
+
+The second row is the boundary case that binary floating point can round down. Stocky uses half-away-from-zero decimal rounding, so `0.00015` becomes `0.0002` in both the response and the persisted ledger.
 
 ### Corporate actions and adjustment timing
 
@@ -425,7 +468,7 @@ The function only inserts symbol/date pairs that have no history row and returns
 - **Stock events** - Views account for splits, bonus issues, mergers, and delisting, including merger cash consideration, terminal cash-exit/write-off outcomes, and per-event fractional-share settlement.
 - **Adjustments/refunds** - Stored in `adjustments` and reflected in ledger entries.
 - **Negative quantities after adjustment** - Prevented by transactional validation.
-- **Rounding** - Amounts and quantities are rounded consistently.
+- **Rounding** - Quantities use 6 decimal places and INR amounts use 4. Fee and monetary calculations use exact decimal arithmetic in the write path, with documented half-away-from-zero rounding points. See **Fee assumptions, precision, and rounding**.
 - **Missing current prices** - `today_rewards` and `user_portfolio` use a left join to adjusted current prices. Unpriced rewards/holdings remain visible with `priceStatus: "missing"` and null price/value; `/portfolio` and `/stats` return `valuationComplete`, an unpriced count, and `unpricedSymbols`. `totalPortfolioValue` is priced-holdings-only.
 - **Missing historical prices** - `historical_rewards` left-joins adjusted reward-date prices. Unpriced rewards remain visible with `priceStatus: "missing"` and null price/value; `/historical-inr` returns full-set `valuationComplete`, `unpricedRewards`, and `unpricedSymbols`.
 - **Transaction safety** - Reward creation and adjustment workflows use transactions.

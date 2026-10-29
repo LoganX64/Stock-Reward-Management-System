@@ -12,6 +12,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
@@ -46,18 +47,18 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 
 	req.DeltaQuantity = utils.RoundQuantity(req.DeltaQuantity)
 	req.DeltaAmount = utils.RoundAmount(req.DeltaAmount)
-	if req.DeltaQuantity == 0 && req.DeltaAmount == 0 {
+	if req.DeltaQuantity.IsZero() && req.DeltaAmount.IsZero() {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment must change quantity or amount"))
 		return
 	}
 	switch req.AdjustmentType {
 	case models.Reward_Reversal:
-		if req.DeltaQuantity > 0 || req.DeltaAmount < 0 {
+		if req.DeltaQuantity.IsPositive() || req.DeltaAmount.IsNegative() {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward_reversal requires non-positive delta_quantity and non-negative delta_amount"))
 			return
 		}
 	case models.Fee_Refund:
-		if req.DeltaQuantity != 0 || req.DeltaAmount < 0 {
+		if !req.DeltaQuantity.IsZero() || req.DeltaAmount.IsNegative() {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("fee_refund requires zero delta_quantity and non-negative delta_amount"))
 			return
 		}
@@ -90,9 +91,9 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 	// return the updated row while its subquery still uses the transaction's
 	// older statement snapshot. That would let two concurrent adjustments both
 	// calculate from the same starting quantity and lose one update.
-	var currentQty float64
+	var currentQty decimal.Decimal
 	var stockSymbol string
-	var normalizationFactor float64
+	var normalizationFactor decimal.Decimal
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 			r.stock_symbol,
@@ -121,7 +122,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 	// settlement floors the current balance, so a delta large enough to take the
 	// gross quantity negative but not the settled quantity must still be
 	// rejected against the settled balance.
-	var settledQty float64
+	var settledQty decimal.Decimal
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(s.settled_quantity, 0)
 		FROM reward_action_settlement($1, market_today()) s
@@ -131,9 +132,9 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 
-	normalizedDelta := req.DeltaQuantity * normalizationFactor
-	newQty := currentQty + normalizedDelta
-	if newQty < 0 || settledQty+req.DeltaQuantity < 0 {
+	normalizedDelta := req.DeltaQuantity.Mul(normalizationFactor)
+	newQty := currentQty.Add(normalizedDelta)
+	if newQty.IsNegative() || settledQty.Add(req.DeltaQuantity).IsNegative() {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("adjustment would make quantity negative"))
 		return
 	}
@@ -202,7 +203,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				}
 				existing.CreatedAt = existingCreatedAt.UTC().Format(time.RFC3339Nano)
 				if existing.RewardID != rewardID || existing.AdjustmentType != req.AdjustmentType ||
-					existing.DeltaQuantity != req.DeltaQuantity || existing.DeltaAmount != req.DeltaAmount || existing.Reason != req.Reason {
+					!existing.DeltaQuantity.Equal(req.DeltaQuantity) || !existing.DeltaAmount.Equal(req.DeltaAmount) || existing.Reason != req.Reason {
 					response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
 					return
 				}
@@ -257,16 +258,16 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 
 	switch req.AdjustmentType {
 	case models.Reward_Reversal:
-		if req.DeltaQuantity != 0 {
+		if !req.DeltaQuantity.IsZero() {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:    rewardID,
 				Entry_Type:   models.StockUnits,
 				Stock_Symbol: stockSymbol,
 				Quantity:     req.DeltaQuantity, // same signed delta as reward update
-				Amount:       0,
+				Amount:       decimal.Zero,
 			})
 		}
-		if req.DeltaAmount != 0 {
+		if !req.DeltaAmount.IsZero() {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
@@ -274,7 +275,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 			})
 		}
 	case models.Fee_Refund:
-		if req.DeltaAmount != 0 {
+		if !req.DeltaAmount.IsZero() {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,
@@ -282,16 +283,16 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 			})
 		}
 	case models.Manual_Correction:
-		if req.DeltaQuantity != 0 {
+		if !req.DeltaQuantity.IsZero() {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:    rewardID,
 				Entry_Type:   models.StockUnits,
 				Stock_Symbol: stockSymbol,
 				Quantity:     req.DeltaQuantity,
-				Amount:       0,
+				Amount:       decimal.Zero,
 			})
 		}
-		if req.DeltaAmount != 0 {
+		if !req.DeltaAmount.IsZero() {
 			ledgerEntries = append(ledgerEntries, models.Ledger{
 				Reward_ID:  rewardID,
 				Entry_Type: models.INROutflow,

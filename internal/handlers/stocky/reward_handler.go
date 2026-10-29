@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"math"
 	"net/http"
 	"time"
 
@@ -13,15 +12,16 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
 // CreateRewardRequest is the minimal request structure used by the insert helper.
 type CreateRewardRequest struct {
-	UserID         int64   `json:"user_id"`
-	StockSymbol    string  `json:"stock_symbol"`
-	IdempotencyKey string  `json:"idempotency_key"`
-	Quantity       float64 `json:"quantity"`
+	UserID         int64           `json:"user_id"`
+	StockSymbol    string          `json:"stock_symbol"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Quantity       decimal.Decimal `json:"quantity"`
 }
 
 // InsertReward inserts a reward row, ensuring an empty idempotency key is stored as SQL NULL.
@@ -53,7 +53,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	}
 
 	// Basic validation
-	if req.Quantity <= 0 {
+	if !req.Quantity.IsPositive() {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
 		return
 	}
@@ -64,7 +64,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	}
 
 	req.Quantity = utils.RoundQuantity(req.Quantity)
-	if req.Quantity <= 0 {
+	if !req.Quantity.IsPositive() {
 		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("quantity must be greater than zero"))
 		return
 	}
@@ -103,7 +103,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 	// Fetch the current split/bonus-adjusted price. Symbols are stored and
 	// looked up canonically; the ordering keeps the lookup deterministic even if
 	// a legacy duplicate somehow reaches the view.
-	var currentPrice float64
+	var currentPrice decimal.Decimal
 	if err := tx.QueryRowContext(ctx, `SELECT adjusted_price FROM stock_prices_adjusted WHERE stock_symbol = $1 ORDER BY updated_at DESC, id DESC LIMIT 1`, req.StockSymbol).Scan(&currentPrice); err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("Stock symbol not found"))
@@ -177,7 +177,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 				}
 
 				if err == nil {
-					if reward.User_ID != req.UserID || utils.NormalizeStockSymbol(reward.Stock_Symbol) != req.StockSymbol || reward.Quantity != req.Quantity {
+					if reward.User_ID != req.UserID || utils.NormalizeStockSymbol(reward.Stock_Symbol) != req.StockSymbol || !reward.Quantity.Equal(req.Quantity) {
 						response.WriteJson(c.Writer, http.StatusConflict, response.ErrorResponse("idempotency key already used with different payload"))
 						return
 					}
@@ -207,36 +207,34 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 
-	// Calculate financials
-	absQty := math.Abs(req.Quantity)
-	shareValue := utils.RoundAmount(currentPrice * absQty)
-	isReversal := req.Quantity < 0
+	// Calculate financials using exact decimal arithmetic. The notional is
+	// rounded once at 4 dp, then each fee is rounded and GST is based on the
+	// already-rounded brokerage and STT. The same values are returned to the
+	// client and persisted to the ledger.
+	absQty := req.Quantity.Abs()
+	shareValue := utils.RoundAmount(currentPrice.Mul(absQty))
+	isReversal := req.Quantity.IsNegative()
 
 	// Cash flow: negative = outflow (normal reward), positive = inflow (reversal)
-	cashFlow := -shareValue
+	cashFlow := shareValue.Neg()
 	if isReversal {
 		cashFlow = shareValue
 	}
 
-	brokerage := 0.0
-	stt := 0.0
-	gst := 0.0
+	fees := utils.FeeBreakdown{}
 	if !isReversal {
-		brokerage = utils.RoundAmount(shareValue * 0.005)
-		stt = utils.RoundAmount(shareValue * 0.001)
-		gst = utils.RoundAmount((brokerage + stt) * 0.18)
+		fees = utils.CalculateFees(shareValue)
 	}
-	totalFees := utils.RoundAmount(brokerage + stt + gst)
 
 	responseBody := map[string]interface{}{
 		"message":    "Reward created successfully",
 		"rewardId":   reward.ID,
 		"amount_inr": shareValue,
 		"fees": map[string]interface{}{
-			"brokerage": brokerage,
-			"stt":       stt,
-			"gst":       gst,
-			"total":     totalFees,
+			"brokerage": fees.Brokerage,
+			"stt":       fees.STT,
+			"gst":       fees.GST,
+			"total":     fees.Total,
 		},
 		"is_reversal": isReversal,
 	}
@@ -259,13 +257,13 @@ func (h *Handler) CreateReward(c *gin.Context) {
 			Entry_Type:   models.StockUnits,
 			Stock_Symbol: req.StockSymbol,
 			Quantity:     req.Quantity,
-			Amount:       0,
+			Amount:       decimal.Zero,
 		},
 		{
 			Reward_ID:    reward.ID,
 			Entry_Type:   models.INROutflow,
 			Stock_Symbol: "",
-			Quantity:     0,
+			Quantity:     decimal.Zero,
 			Amount:       cashFlow,
 		},
 	}
@@ -274,15 +272,15 @@ func (h *Handler) CreateReward(c *gin.Context) {
 			models.Ledger{
 				Reward_ID:  reward.ID,
 				Entry_Type: models.BrokerageFee,
-				Amount:     -brokerage},
+				Amount:     fees.Brokerage.Neg()},
 			models.Ledger{
 				Reward_ID:  reward.ID,
 				Entry_Type: models.STTFee,
-				Amount:     -stt},
+				Amount:     fees.STT.Neg()},
 			models.Ledger{
 				Reward_ID:  reward.ID,
 				Entry_Type: models.GSTFee,
-				Amount:     -gst},
+				Amount:     fees.GST.Neg()},
 		)
 	}
 

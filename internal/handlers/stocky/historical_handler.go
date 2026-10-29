@@ -10,6 +10,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
@@ -110,8 +111,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	var history []models.HistoricalINR
 	for rows.Next() {
 		var rec models.HistoricalINR
-		var price sql.NullFloat64
-		var inrValue sql.NullFloat64
+		var price decimal.NullDecimal
+		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
 		var delistEffectiveDate sql.NullTime
 		if err := rows.Scan(
@@ -143,12 +144,10 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		rec.CashProceeds = utils.RoundAmount(rec.CashProceeds)
 		rec.WrittenOffQuantity = utils.RoundQuantity(rec.WrittenOffQuantity)
 		if price.Valid {
-			v := utils.RoundAmount(price.Float64)
-			rec.Price = &v
+			rec.Price = decimal.NullDecimal{Decimal: utils.RoundAmount(price.Decimal), Valid: true}
 		}
 		if inrValue.Valid {
-			v := utils.RoundAmount(inrValue.Float64)
-			rec.INRValue = &v
+			rec.INRValue = decimal.NullDecimal{Decimal: utils.RoundAmount(inrValue.Decimal), Valid: true}
 		}
 		if priceAsOf.Valid {
 			t := priceAsOf.Time.UTC()

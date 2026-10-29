@@ -8,6 +8,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
 
@@ -48,8 +49,8 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 	unpricedSymbols := []string{}
 	for rows.Next() {
 		var s models.TodayStock
-		var currentPrice sql.NullFloat64
-		var inrValue sql.NullFloat64
+		var currentPrice decimal.NullDecimal
+		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
 		if err := rows.Scan(
 			&s.RewardID,
@@ -71,15 +72,13 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 		s.AdjustedQuantity = utils.RoundQuantity(s.AdjustedQuantity)
 		s.TotalAdjustmentAmount = utils.RoundAmount(s.TotalAdjustmentAmount)
 		if currentPrice.Valid {
-			v := utils.RoundAmount(currentPrice.Float64)
-			s.CurrentPrice = &v
+			s.CurrentPrice = decimal.NullDecimal{Decimal: utils.RoundAmount(currentPrice.Decimal), Valid: true}
 		} else {
 			unpricedRewards++
 			unpricedSymbols = append(unpricedSymbols, s.StockSymbol)
 		}
 		if inrValue.Valid {
-			v := utils.RoundAmount(inrValue.Float64)
-			s.INRValue = &v
+			s.INRValue = decimal.NullDecimal{Decimal: utils.RoundAmount(inrValue.Decimal), Valid: true}
 		}
 		if priceAsOf.Valid {
 			t := priceAsOf.Time.UTC()

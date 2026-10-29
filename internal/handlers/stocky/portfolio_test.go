@@ -258,7 +258,7 @@ func TestGetPortfolioTotals_ZeroHoldings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if value != 0 {
+	if !value.IsZero() {
 		t.Errorf("expected zero value, got %v", value)
 	}
 	if positions != 0 {

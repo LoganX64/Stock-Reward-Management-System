@@ -3,6 +3,8 @@ package stocky
 import (
 	"context"
 	"database/sql"
+
+	"github.com/shopspring/decimal"
 )
 
 // Handler holds all dependencies (mainly DB)
@@ -37,15 +39,15 @@ func (h *Handler) beginReadSnapshot(ctx context.Context) (*sql.Tx, error) {
 
 // getUserCorporateActionCash returns the user's total cash proceeds,
 // written-off quantity, and the cash-in-lieu subset of total cash proceeds.
-func (h *Handler) getUserCorporateActionCash(q dbReader, userID int) (float64, float64, float64, error) {
-	var cashProceeds, writtenOffQuantity, cashInLieuProceeds float64
+func (h *Handler) getUserCorporateActionCash(q dbReader, userID int) (decimal.Decimal, decimal.Decimal, decimal.Decimal, error) {
+	var cashProceeds, writtenOffQuantity, cashInLieuProceeds decimal.Decimal
 	err := q.QueryRow(`
 		SELECT cash_proceeds, written_off_quantity, cash_in_lieu_proceeds
 		FROM user_corporate_action_cash
 		WHERE user_id = $1
 	`, userID).Scan(&cashProceeds, &writtenOffQuantity, &cashInLieuProceeds)
 	if err == sql.ErrNoRows {
-		return 0, 0, 0, nil
+		return decimal.Zero, decimal.Zero, decimal.Zero, nil
 	}
 	return cashProceeds, writtenOffQuantity, cashInLieuProceeds, err
 }
@@ -84,8 +86,8 @@ func (h *Handler) getUnpricedPortfolioSymbols(q dbReader, userID int) ([]string,
 // independent of pagination. totalPortfolioValue sums only priced holdings;
 // totalPositions includes unpriced holdings. valuationDate is the database
 // date used by the shared reporting views in the current snapshot.
-func (h *Handler) getPortfolioTotals(q dbReader, userID int) (float64, int, string, error) {
-	var totalPortfolioValue float64
+func (h *Handler) getPortfolioTotals(q dbReader, userID int) (decimal.Decimal, int, string, error) {
+	var totalPortfolioValue decimal.Decimal
 	var totalPositions int
 	var valuationDate string
 
@@ -98,7 +100,7 @@ func (h *Handler) getPortfolioTotals(q dbReader, userID int) (float64, int, stri
 		WHERE user_id = $1
 	`, userID).Scan(&totalPortfolioValue, &totalPositions, &valuationDate)
 	if err != nil {
-		return 0, 0, "", err
+		return decimal.Zero, 0, "", err
 	}
 	return totalPortfolioValue, totalPositions, valuationDate, nil
 }

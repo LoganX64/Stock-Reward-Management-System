@@ -24,6 +24,7 @@ import (
 
 	"github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 )
 
 // TestCleanMigrationIntegration verifies that a completely empty database can
@@ -304,6 +305,119 @@ func TestTransactionalWritesIntegration(t *testing.T) {
 
 		if scalarBool(t, db, `SELECT is_reconciled FROM reward_ledger_reconciliation WHERE reward_id = $1`, corruptRewardID) {
 			t.Error("reconciliation did not detect an extra stock_units posting")
+		}
+	})
+}
+
+// TestFinancialArithmeticIntegration verifies the documented fee formulas and
+// rounding points against a real PostgreSQL database. The same decimal values
+// must appear in the HTTP response and in the persisted ledger.
+func TestFinancialArithmeticIntegration(t *testing.T) {
+	adminURL := integrationDatabaseURL(t)
+	dbURL := createIntegrationDatabase(t, adminURL)
+	applyMigrations(t, dbURL, -1)
+
+	db := openIntegrationDB(t, dbURL)
+	router := integrationRouter(db)
+	userID := insertIntegrationUser(t, db, "financial-arithmetic")
+
+	type feeResponse struct {
+		Brokerage json.Number `json:"brokerage"`
+		STT       json.Number `json:"stt"`
+		GST       json.Number `json:"gst"`
+		Total     json.Number `json:"total"`
+	}
+	type rewardResponse struct {
+		AmountINR json.Number `json:"amount_inr"`
+		Fees      feeResponse `json:"fees"`
+	}
+
+	assertLedgerAmount := func(t *testing.T, rewardID int, entryType, want string) {
+		t.Helper()
+		got := scalarString(t, db, `
+			SELECT amount::text
+			FROM ledger
+			WHERE reward_id = $1 AND entry_type::text = $2
+		`, rewardID, entryType)
+		parsed, err := decimal.NewFromString(got)
+		if err != nil {
+			t.Fatalf("parse ledger amount %q: %v", got, err)
+		}
+		expected, err := decimal.NewFromString(want)
+		if err != nil {
+			t.Fatalf("parse expected ledger amount %q: %v", want, err)
+		}
+		if !parsed.Equal(expected) {
+			t.Errorf("ledger %s amount = %s, want %s", entryType, got, want)
+		}
+	}
+
+	t.Run("half-away-from-zero notional is persisted exactly", func(t *testing.T) {
+		seedStockPrice(t, db, "TXHALF", 0.0003)
+		created := doIntegrationRequest(t, router, http.MethodPost, "/api/v1/reward", map[string]any{
+			"user_id":         userID,
+			"stock_symbol":    "TXHALF",
+			"quantity":        0.5,
+			"idempotency_key": "financial-half-reward",
+		})
+		requireStatus(t, created, http.StatusOK)
+
+		var response rewardResponse
+		if err := json.Unmarshal(created.raw, &response); err != nil {
+			t.Fatalf("decode reward response: %v", err)
+		}
+		if response.AmountINR.String() != "0.0002" {
+			t.Errorf("amount_inr = %s, want 0.0002", response.AmountINR)
+		}
+		if response.Fees.Brokerage.String() != "0" || response.Fees.STT.String() != "0" ||
+			response.Fees.GST.String() != "0" || response.Fees.Total.String() != "0" {
+			t.Errorf("fees = %+v, want all zero", response.Fees)
+		}
+
+		rewardID := bodyInt(t, created.body, "rewardId")
+		assertLedgerAmount(t, rewardID, "inr_outflow", "-0.0002")
+		assertLedgerAmount(t, rewardID, "brokerage_fee", "0")
+		assertLedgerAmount(t, rewardID, "stt_fee", "0")
+		assertLedgerAmount(t, rewardID, "gst_fee", "0")
+		if !scalarBool(t, db, `SELECT is_reconciled FROM reward_ledger_reconciliation WHERE reward_id = $1`, rewardID) {
+			t.Error("boundary-rounding reward is not reconciled")
+		}
+	})
+
+	t.Run("documented fee schedule matches response and ledger", func(t *testing.T) {
+		seedStockPrice(t, db, "TXFEES", 100)
+		created := doIntegrationRequest(t, router, http.MethodPost, "/api/v1/reward", map[string]any{
+			"user_id":         userID,
+			"stock_symbol":    "TXFEES",
+			"quantity":        2,
+			"idempotency_key": "financial-fee-reward",
+		})
+		requireStatus(t, created, http.StatusOK)
+
+		var response rewardResponse
+		if err := json.Unmarshal(created.raw, &response); err != nil {
+			t.Fatalf("decode reward response: %v", err)
+		}
+		if response.AmountINR.String() != "200" {
+			t.Errorf("amount_inr = %s, want 200", response.AmountINR)
+		}
+		wantFees := feeResponse{
+			Brokerage: json.Number("1"),
+			STT:       json.Number("0.2"),
+			GST:       json.Number("0.216"),
+			Total:     json.Number("1.416"),
+		}
+		if response.Fees != wantFees {
+			t.Errorf("fees = %+v, want %+v", response.Fees, wantFees)
+		}
+
+		rewardID := bodyInt(t, created.body, "rewardId")
+		assertLedgerAmount(t, rewardID, "inr_outflow", "-200")
+		assertLedgerAmount(t, rewardID, "brokerage_fee", "-1")
+		assertLedgerAmount(t, rewardID, "stt_fee", "-0.2")
+		assertLedgerAmount(t, rewardID, "gst_fee", "-0.216")
+		if !scalarBool(t, db, `SELECT is_reconciled FROM reward_ledger_reconciliation WHERE reward_id = $1`, rewardID) {
+			t.Error("fee-schedule reward is not reconciled")
 		}
 	})
 }
