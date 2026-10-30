@@ -149,7 +149,7 @@ Historical rewards use the same explicit-gap rule. In grant-date mode, when `sto
 
 The project uses PostgreSQL with the following main tables and views:
 
-- `users`: User information.
+- `users`: User information, including optional deactivation via `deleted_at`.
 - `rewards`: Reward events with optional idempotency keys.
 - `ledger`: Stock units, INR outflows, fee entries, and corporate-action cash postings tagged with `stock_event_id`.
 - `stock_prices`: Latest stock prices.
@@ -172,10 +172,23 @@ The project uses PostgreSQL with the following main tables and views:
 
 ### Key Relationships
 
-- `users` -> `rewards` (`user_id`)
-- `rewards` -> `ledger` (`reward_id`)
-- `rewards` -> `adjustments` (`reward_id`)
+- `users` -> `rewards` (`user_id`, `ON DELETE RESTRICT`)
+- `rewards` -> `ledger` (`reward_id`, `ON DELETE RESTRICT`)
+- `rewards` -> `adjustments` (`reward_id`, `ON DELETE RESTRICT`)
+- `stock_events` -> `ledger` (`stock_event_id`, `ON DELETE RESTRICT`)
 - `stock_events` -> `stock_prices` (`stock_symbol`)
+
+### Retention and deletion
+
+Financial records are append-only with respect to deletion. Deleting a user, reward, or stock event must not silently remove the ledger, adjustment, or cash-posting history that explains a past transaction.
+
+- Users are deactivated by setting `users.deleted_at`; all of their rewards, ledger entries, adjustments, and corporate-action cash remain readable. Deactivated users cannot receive new rewards. Example: `UPDATE users SET deleted_at = NOW() WHERE id = $1;`.
+- A user with rewards cannot be hard-deleted. A reward with ledger postings or adjustments cannot be hard-deleted. A stock event with tagged corporate-action cash postings cannot be hard-deleted.
+- The foreign keys use `ON DELETE RESTRICT`, not `ON DELETE CASCADE`. PostgreSQL checks `RESTRICT` immediately, so the failing statement is rejected instead of deleting dependent financial rows.
+- There is no automatic purge or archival job. Financial records are retained indefinitely by default; any future retention or legal-hold process must be explicit, documented, and outside the normal request path.
+- Corrections should be made by posting compensating adjustments or updating the stock event, not by deleting the original record.
+
+Migration `0024_retention_and_delete_policy` replaces the original cascades and adds `users.deleted_at`. Its down migration restores the development-era cascades and should not be used as a production deletion procedure.
 
 ### Business dates and timezones
 
@@ -188,7 +201,7 @@ Stocky is an Indian-equity system, so every business date is a market date in **
 Timestamp and date columns are deliberately typed:
 
 - `rewards.reward_date` is an explicit `DATE` derived from `rewards.created_at` by the `trg_set_reward_date` trigger. Existing reward dates were preserved when the former generated column was converted. Same-day uniqueness and indexes continue to use `reward_date`.
-- `rewards.created_at`, `ledger.created_at`, `adjustments.created_at`, `users.created_at`, `stock_prices.updated_at`, and `stock_price_history.created_at` are `TIMESTAMPTZ`. API output converts them to UTC.
+- `rewards.created_at`, `ledger.created_at`, `adjustments.created_at`, `users.created_at`, `users.deleted_at`, `stock_prices.updated_at`, and `stock_price_history.created_at` are `TIMESTAMPTZ`. API output converts them to UTC.
 - `stock_events.effective_date`, `adjustments.effective_date`, and `stock_price_history.date` are `DATE`. Corporate actions become effective at 00:00 IST on their date, and every event type — including delists — uses the same inclusive boundary.
 
 Migration `0022_business_date_timezone_semantics` interprets legacy `TIMESTAMP` values as IST wall-clock time (`AT TIME ZONE 'Asia/Kolkata'`), so existing business dates do not move. The boundary behavior is covered by `internal/database/timezone_integration_test.go`, which runs the migrations against a disposable database under `UTC`, `Asia/Kolkata`, `America/Los_Angeles`, and `Pacific/Kiritimati` when `TEST_DATABASE_URL` is set.
@@ -200,7 +213,7 @@ Migration `0023_case_normalized_instruments` makes instrument symbols canonical 
 - `stock_prices`, `stock_price_history`, `rewards`, `ledger`, and `stock_events` store only canonical symbols. `BEFORE INSERT OR UPDATE` triggers normalize new writes, and `CHECK` constraints reject non-canonical values if a trigger is bypassed.
 - Functional unique indexes enforce one current price, one daily history row per date, and one reward per user/symbol/market date after normalization. `stock_events` keeps its existing normalized unique index.
 - Valuation, lineage, settlement, and reconciliation joins use exact canonical equality, so `AAPL` and `aapl` cannot multiply rows. Reward creation also looks up the price with an exact symbol match and a deterministic `updated_at DESC, id DESC` tie-break.
-- Migration `0023` resolves existing `stock_prices` / `stock_price_history` case variants by keeping the latest row (`updated_at` / `created_at`). It aborts instead of deleting if `rewards` or `stock_events` contain normalized duplicates, because those are financial/audit records (and event deletion cascades to ledger postings).
+- Migration `0023` resolves existing `stock_prices` / `stock_price_history` case variants by keeping the latest row (`updated_at` / `created_at`). It aborts instead of deleting if `rewards` or `stock_events` contain normalized duplicates, because those are financial/audit records and event deletion must not erase ledger postings.
 - The data normalization is one-way; the down migration restores the previous schema behavior but cannot restore original casing.
 
 ### Fee assumptions, precision, and rounding
@@ -387,7 +400,8 @@ The integration tests are skipped when `TEST_DATABASE_URL` is not set. They cove
 - concurrent keyed rewards, unkeyed same-day rewards, adjustment retries, and overdraft adjustments, asserting that each logical operation commits exactly one effect;
 - reward replay after a later adjustment and ledger reconciliation;
 - split, bonus, reverse-split, merger-chain, delist, and cash-in-lieu valuation semantics;
-- explicit `missing` price status for current and historical valuations.
+- explicit `missing` price status for current and historical valuations;
+- restrictive deletion and user-deactivation retention behavior.
 
 Run only the stocky handler tests:
 

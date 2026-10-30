@@ -57,7 +57,7 @@
   - `stock_prices`, `stock_price_history`, `rewards`, `ledger`, and `stock_events` store canonical symbols. `BEFORE INSERT OR UPDATE` triggers normalize writes, and `CHECK` constraints reject non-canonical stored values if a trigger is bypassed.
   - Normalized functional unique indexes enforce one current price per symbol, one history row per symbol and date, and one reward per user/symbol/market date. `stock_events` keeps its normalized unique index.
   - Valuation, lineage, settlement, and reconciliation joins use exact canonical equality. Reward creation uses an exact canonical price lookup with a deterministic `updated_at DESC, id DESC` tie-break.
-  - Existing `stock_prices` and `stock_price_history` variants are resolved by keeping the row with the latest `updated_at` or `created_at` (then the canonical row, then the highest id). The migration aborts if `rewards` or `stock_events` contain normalized duplicates; it never deletes financial/audit rows or cascades event deletion into ledger postings.
+  - Existing `stock_prices` and `stock_price_history` variants are resolved by keeping the row with the latest `updated_at` or `created_at` (then the canonical row, then the highest id). The migration aborts if `rewards` or `stock_events` contain normalized duplicates; it never deletes financial/audit rows, and migration `0024` prevents event deletion from cascading into ledger postings.
   - The migration normalizes data one-way. The down migration restores the previous schema behavior but does not restore original casing or whitespace.
 
 ## 3. Missing Current and Historical Prices
@@ -160,6 +160,17 @@
   - Database writes have retry logic.
   - Workers recover from panics and respect context cancellation.
 
+## 9. Retention and Deletion
+
+- **Problem:** A direct `DELETE` on a user, reward, or stock event used to cascade into rewards, ledger postings, and adjustments. A single statement could silently erase the only record of a past transaction, making reconciliation impossible and changing historical reporting retroactively.
+- **Handling:**
+  - `users.deleted_at` is the supported offboarding path. A deactivated user keeps all financial history but cannot receive new rewards.
+  - `rewards.user_id`, `ledger.reward_id`, `adjustments.reward_id`, and `ledger.stock_event_id` use `ON DELETE RESTRICT`. Hard deletion of a parent with financial children fails with SQLSTATE `23503` and leaves the history intact.
+  - A reward or stock event with financial children cannot be hard-deleted. Correct it with an adjustment or an event update instead of deleting it.
+  - There is no automatic purge job. Retention is indefinite by default; future archival, legal hold, or purge work must be an explicit, documented operational process.
+  - Migration `0024_retention_and_delete_policy` implements the policy. Its down migration restores the old cascades for development rollback only.
+  - `internal/database/retention_integration_test.go` proves that rejected deletes preserve history, deactivation keeps records readable, and the down migration restores the previous behavior.
+
 ## Summary
 
 This system handles:
@@ -172,3 +183,4 @@ This system handles:
 6. Transactional reward adjustments.
 7. Explicit market-date and timezone semantics for rewards, corporate actions, price history, and historical snapshots.
 8. Paginated historical and portfolio reads.
+9. Financial-record retention with restrictive deletion and user deactivation.

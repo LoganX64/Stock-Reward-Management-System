@@ -87,9 +87,9 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		}
 	}()
 
-	// Check user exists
+	// Check user exists and has not been deactivated
 	var userExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`,
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND deleted_at IS NULL)`,
 		req.UserID).Scan(&userExists); err != nil {
 		logger.WithError(err).Error("User existence check failed")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
