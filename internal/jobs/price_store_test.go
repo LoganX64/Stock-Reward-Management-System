@@ -240,3 +240,55 @@ func TestSaveQuoteFailsWhenCommitFails(t *testing.T) {
 		t.Fatalf("unfulfilled expectations: %v", err)
 	}
 }
+
+func TestListCurrentPricesNormalizesSymbolsAndHandlesNullTimestamps(t *testing.T) {
+	store, mock := newPriceStoreMock(t)
+	asOf := time.Date(2026, 10, 30, 9, 58, 16, 0, time.UTC)
+
+	mock.ExpectQuery(listCurrentPricesSQL).
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "price", "updated_at", "source"}).
+			AddRow(" tcs ", "2502.6000", asOf, "yahoo").
+			AddRow("infy", "1185.0000", nil, "legacy"))
+
+	entries, err := store.ListCurrentPrices(context.Background())
+	if err != nil {
+		t.Fatalf("ListCurrentPrices() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ListCurrentPrices() returned %d entries, want 2", len(entries))
+	}
+	if entries[0].Symbol != "TCS" {
+		t.Errorf("entries[0].Symbol = %q, want TCS", entries[0].Symbol)
+	}
+	if !entries[0].Price.Equal(decimal.RequireFromString("2502.6000")) {
+		t.Errorf("entries[0].Price = %s, want 2502.6000", entries[0].Price)
+	}
+	if !entries[0].AsOf.Equal(asOf) {
+		t.Errorf("entries[0].AsOf = %s, want %s", entries[0].AsOf, asOf)
+	}
+	if entries[0].Source != "yahoo" {
+		t.Errorf("entries[0].Source = %q, want yahoo", entries[0].Source)
+	}
+	if entries[1].Symbol != "INFY" {
+		t.Errorf("entries[1].Symbol = %q, want INFY", entries[1].Symbol)
+	}
+	if !entries[1].AsOf.IsZero() {
+		t.Errorf("entries[1].AsOf = %s, want zero for NULL timestamp", entries[1].AsOf)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestListCurrentPricesReturnsQueryError(t *testing.T) {
+	store, mock := newPriceStoreMock(t)
+
+	mock.ExpectQuery(listCurrentPricesSQL).WillReturnError(errors.New("query failed"))
+
+	if _, err := store.ListCurrentPrices(context.Background()); err == nil {
+		t.Fatal("ListCurrentPrices() returned nil error, want query failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}

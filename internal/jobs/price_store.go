@@ -6,13 +6,28 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shopspring/decimal"
+	"github.com/sirupsen/logrus"
+
 	"github.com/LoganX64/stocky-api/internal/marketdata"
+	"github.com/LoganX64/stocky-api/internal/utils"
 )
 
 // PriceStore persists validated quotes. Current price and daily history are
 // written in one transaction so a quote is never half-recorded.
 type PriceStore interface {
 	SaveQuote(ctx context.Context, quote marketdata.Quote) (SaveResult, error)
+	ListCurrentPrices(ctx context.Context) ([]CurrentPrice, error)
+}
+
+// CurrentPrice is the stored current price for a tracked symbol together with
+// its quote time and provenance. It is used to seed the cache and decide
+// whether a startup catch-up cycle is needed.
+type CurrentPrice struct {
+	Symbol string
+	Price  decimal.Decimal
+	AsOf   time.Time
+	Source string
 }
 
 // SaveResult reports whether the current price row and the history row were
@@ -119,6 +134,50 @@ WHERE
         )
     )
 `
+
+const listCurrentPricesSQL = `
+SELECT stock_symbol, price, updated_at, source
+FROM stock_prices
+ORDER BY stock_symbol
+`
+
+// ListCurrentPrices returns the current price rows used to seed the cache and
+// to decide whether the first cycle after startup is a catch-up.
+func (s *SQLPriceStore) ListCurrentPrices(ctx context.Context) ([]CurrentPrice, error) {
+	rows, err := s.db.QueryContext(ctx, listCurrentPricesSQL)
+	if err != nil {
+		return nil, fmt.Errorf("list current prices: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []CurrentPrice
+	for rows.Next() {
+		var (
+			symbol    string
+			price     decimal.Decimal
+			updatedAt sql.NullTime
+			source    string
+		)
+		if err := rows.Scan(&symbol, &price, &updatedAt, &source); err != nil {
+			logrus.WithError(err).Warn("Skipping malformed row in stock_prices")
+			continue
+		}
+
+		entry := CurrentPrice{
+			Symbol: utils.NormalizeStockSymbol(symbol),
+			Price:  price,
+			Source: source,
+		}
+		if updatedAt.Valid {
+			entry.AsOf = updatedAt.Time
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list current prices row iteration: %w", err)
+	}
+	return entries, nil
+}
 
 // SaveQuote validates quote, then upserts the current price and the daily
 // history row in one transaction. Both writes commit together or neither does.

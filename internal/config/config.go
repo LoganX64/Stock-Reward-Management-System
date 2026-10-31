@@ -27,8 +27,8 @@ type Database struct {
 	SSLMode  string
 }
 
-// MarketData holds A3 market-data configuration. The live price path is not
-// wired to these values until Phase 3.
+// MarketData holds A3 market-data configuration consumed by the live price
+// scheduler and providers.
 type MarketData struct {
 	Enabled         bool
 	Provider        string

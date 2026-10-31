@@ -3,15 +3,17 @@ package jobs
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"math/rand"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/LoganX64/stocky-api/internal/utils"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
+
+	"github.com/LoganX64/stocky-api/internal/marketcal"
+	"github.com/LoganX64/stocky-api/internal/marketdata"
+	"github.com/LoganX64/stocky-api/internal/utils"
 )
 
 // =======================
@@ -24,12 +26,8 @@ type DB interface {
 }
 
 type Cache interface {
-	SetPrice(symbol string, price float64, updatedAt time.Time)
-	GetPrice(symbol string) (float64, time.Time, bool)
-}
-
-type PriceFetcher interface {
-	GetLatestPrice(symbol string, lastPrice float64) (float64, error)
+	SetPrice(symbol string, price decimal.Decimal, updatedAt time.Time)
+	GetPrice(symbol string) (decimal.Decimal, time.Time, bool)
 }
 
 // =======================
@@ -42,7 +40,7 @@ type PriceCache struct {
 }
 
 type CachedPrice struct {
-	Price     float64
+	Price     decimal.Decimal
 	UpdatedAt time.Time
 }
 
@@ -50,13 +48,13 @@ func NewPriceCache() *PriceCache {
 	return &PriceCache{prices: make(map[string]CachedPrice)}
 }
 
-func (pc *PriceCache) SetPrice(symbol string, price float64, updatedAt time.Time) {
+func (pc *PriceCache) SetPrice(symbol string, price decimal.Decimal, updatedAt time.Time) {
 	pc.mu.Lock()
 	pc.prices[symbol] = CachedPrice{Price: price, UpdatedAt: updatedAt}
 	pc.mu.Unlock()
 }
 
-func (pc *PriceCache) GetPrice(symbol string) (float64, time.Time, bool) {
+func (pc *PriceCache) GetPrice(symbol string) (decimal.Decimal, time.Time, bool) {
 	pc.mu.RLock()
 	val, ok := pc.prices[symbol]
 	pc.mu.RUnlock()
@@ -64,51 +62,29 @@ func (pc *PriceCache) GetPrice(symbol string) (float64, time.Time, bool) {
 }
 
 // =======================
-// RandomPriceFetcher
-// =======================
-
-type RandomPriceFetcher struct {
-	FallbackFactor float64
-}
-
-func NewRandomPriceFetcher() *RandomPriceFetcher {
-	return &RandomPriceFetcher{FallbackFactor: 0.01}
-}
-
-func (r *RandomPriceFetcher) effectiveFallbackFactor() float64 {
-	if r.FallbackFactor == 0 {
-		return 0.01
-	}
-	return r.FallbackFactor
-}
-
-func (r *RandomPriceFetcher) GetLatestPrice(symbol string, lastPrice float64) (float64, error) {
-	if rand.Float64() < 0.1 {
-		f := r.effectiveFallbackFactor()
-		dampened := utils.RoundAmountFloat(lastPrice * (1.0 - f + rand.Float64()*(2*f)))
-		return dampened, fmt.Errorf("price fetch failed for %s: using dampened fallback", symbol)
-	}
-	return utils.RoundAmountFloat(lastPrice * (0.95 + rand.Float64()*0.10)), nil
-}
-
-// =======================
 // Options & PriceService
 // =======================
 
 type PriceServiceOptions struct {
-	MaxStale        time.Duration
 	Workers         int
 	DBMaxConcurrent int
 	TickInterval    time.Duration
+	MarketHoursOnly bool
+	FinalQuoteDelay time.Duration
+	Calendar        *marketcal.Calendar
+	Freshness       marketcal.FreshnessPolicy
 	Now             func() time.Time
 }
 
 func defaultOptions() PriceServiceOptions {
 	return PriceServiceOptions{
-		MaxStale:        120 * time.Minute,
 		Workers:         5,
 		DBMaxConcurrent: 3,
 		TickInterval:    time.Hour,
+		MarketHoursOnly: true,
+		FinalQuoteDelay: 5 * time.Minute,
+		Calendar:        marketcal.Default(),
+		Freshness:       marketcal.DefaultFreshnessPolicy(marketcal.Default()),
 		Now:             time.Now,
 	}
 }
@@ -117,9 +93,6 @@ func resolveOptions(in *PriceServiceOptions) PriceServiceOptions {
 	o := defaultOptions()
 	if in == nil {
 		return o
-	}
-	if in.MaxStale > 0 {
-		o.MaxStale = in.MaxStale
 	}
 	if in.Workers > 0 {
 		o.Workers = in.Workers
@@ -130,8 +103,29 @@ func resolveOptions(in *PriceServiceOptions) PriceServiceOptions {
 	if in.TickInterval > 0 {
 		o.TickInterval = in.TickInterval
 	}
+	o.MarketHoursOnly = in.MarketHoursOnly
+	if in.FinalQuoteDelay > 0 {
+		o.FinalQuoteDelay = in.FinalQuoteDelay
+	}
+	if in.Calendar != nil {
+		o.Calendar = in.Calendar
+	}
 	if in.Now != nil {
 		o.Now = in.Now
+	}
+
+	o.Freshness = in.Freshness
+	if o.Freshness.Calendar == nil {
+		o.Freshness.Calendar = o.Calendar
+	}
+	if o.Freshness.MaxStale <= 0 {
+		o.Freshness.MaxStale = marketcal.DefaultMaxStale
+	}
+	if o.Freshness.CloseGrace <= 0 {
+		o.Freshness.CloseGrace = marketcal.DefaultCloseGrace
+	}
+	if o.Freshness.FutureSkew <= 0 {
+		o.Freshness.FutureSkew = marketcal.DefaultFutureSkew
 	}
 
 	if o.DBMaxConcurrent > o.Workers {
@@ -141,10 +135,10 @@ func resolveOptions(in *PriceServiceOptions) PriceServiceOptions {
 }
 
 type PriceService struct {
-	db      DB
-	cache   Cache
-	fetcher PriceFetcher
-	opts    PriceServiceOptions
+	store    PriceStore
+	cache    Cache
+	provider marketdata.QuoteProvider
+	opts     PriceServiceOptions
 
 	dbSem chan struct{}
 
@@ -152,14 +146,14 @@ type PriceService struct {
 	started int32
 }
 
-func NewPriceService(db DB, cache Cache, fetcher PriceFetcher, opts *PriceServiceOptions) *PriceService {
+func NewPriceService(store PriceStore, cache Cache, provider marketdata.QuoteProvider, opts *PriceServiceOptions) *PriceService {
 	o := resolveOptions(opts)
 	return &PriceService{
-		db:      db,
-		cache:   cache,
-		fetcher: fetcher,
-		opts:    o,
-		dbSem:   make(chan struct{}, o.DBMaxConcurrent),
+		store:    store,
+		cache:    cache,
+		provider: provider,
+		opts:     o,
+		dbSem:    make(chan struct{}, o.DBMaxConcurrent),
 	}
 }
 
@@ -173,20 +167,26 @@ func (s *PriceService) Start(ctx context.Context) {
 		return
 	}
 
-	s.initializeCache(ctx)
-
-	ticker := time.NewTicker(s.opts.TickInterval)
-	defer ticker.Stop()
-
+	latest, hasLatest := s.initializeCache(ctx)
 	logrus.Info("Price updater started")
 
-	s.triggerUpdate(ctx)
+	if s.shouldCatchUp(s.opts.Now(), latest, hasLatest) {
+		s.triggerUpdate(ctx)
+	}
 
 	for {
+		now := s.opts.Now()
+		next := s.nextScheduledRun(now)
+		if next.IsZero() || !next.After(now) {
+			next = now.Add(s.opts.TickInterval)
+		}
+
+		timer := time.NewTimer(next.Sub(now))
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			s.triggerUpdate(ctx)
 		case <-ctx.Done():
+			timer.Stop()
 			logrus.Info("Price updater stopping -- waiting for in-flight cycle")
 			for !atomic.CompareAndSwapInt32(&s.running, 0, 0) {
 				time.Sleep(50 * time.Millisecond)
@@ -195,6 +195,57 @@ func (s *PriceService) Start(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (s *PriceService) nextScheduledRun(now time.Time) time.Time {
+	if !s.opts.MarketHoursOnly {
+		return now.Add(s.opts.TickInterval)
+	}
+
+	calendar := s.opts.Calendar
+	if !calendar.IsTradingDay(now) {
+		return calendar.NextSessionOpen(now)
+	}
+
+	open := calendar.SessionOpen(now)
+	close := calendar.SessionClose(now)
+	final := close.Add(s.opts.FinalQuoteDelay)
+
+	switch {
+	case now.Before(open):
+		return open
+	case now.Before(close):
+		elapsed := now.Sub(open)
+		ticks := elapsed/s.opts.TickInterval + 1
+		next := open.Add(ticks * s.opts.TickInterval)
+		if !next.Before(close) {
+			return final
+		}
+		return next
+	case now.Before(final):
+		return final
+	default:
+		return calendar.NextSessionOpen(now)
+	}
+}
+
+func (s *PriceService) shouldCatchUp(now time.Time, latest CurrentPrice, hasLatest bool) bool {
+	if !s.opts.MarketHoursOnly {
+		return true
+	}
+
+	calendar := s.opts.Calendar
+	if !calendar.IsTradingDay(now) {
+		return false
+	}
+	if now.Before(calendar.SessionOpen(now)) {
+		return false
+	}
+	if !hasLatest || latest.AsOf.IsZero() {
+		return true
+	}
+
+	return s.opts.Freshness.ClassifySource(latest.Source, latest.AsOf, now) != marketcal.FreshnessFresh
 }
 
 func (s *PriceService) triggerUpdate(ctx context.Context) {
@@ -221,16 +272,23 @@ func (s *PriceService) triggerUpdate(ctx context.Context) {
 // Cache initialization
 // =======================
 
-func (s *PriceService) initializeCache(ctx context.Context) {
-	entries, err := s.querySymbolPrices(ctx)
+func (s *PriceService) initializeCache(ctx context.Context) (CurrentPrice, bool) {
+	entries, err := s.store.ListCurrentPrices(ctx)
 	if err != nil {
 		logrus.WithError(err).Error("Cache initialisation failed")
-		return
+		return CurrentPrice{}, false
 	}
+
+	var latest CurrentPrice
 	for _, e := range entries {
-		s.cache.SetPrice(e.Symbol, e.OldPrice, e.UpdatedAt)
+		s.cache.SetPrice(e.Symbol, e.Price, e.AsOf)
+		if !e.AsOf.IsZero() && (latest.AsOf.IsZero() || e.AsOf.After(latest.AsOf)) {
+			latest = e
+		}
 	}
 	logrus.Infof("Cache seeded with %d symbols", len(entries))
+
+	return latest, !latest.AsOf.IsZero()
 }
 
 // =======================
@@ -239,12 +297,12 @@ func (s *PriceService) initializeCache(ctx context.Context) {
 
 type PriceJob struct {
 	Symbol    string
-	OldPrice  float64
+	OldPrice  decimal.Decimal
 	UpdatedAt time.Time
 }
 
 func (s *PriceService) updatePrices(ctx context.Context) {
-	entries, err := s.querySymbolPrices(ctx)
+	entries, err := s.store.ListCurrentPrices(ctx)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to fetch symbols -- skipping cycle")
 		return
@@ -269,8 +327,13 @@ func (s *PriceService) updatePrices(ctx context.Context) {
 	go func() {
 		defer close(jobs)
 		for _, e := range entries {
+			job := PriceJob{
+				Symbol:    e.Symbol,
+				OldPrice:  e.Price,
+				UpdatedAt: e.AsOf,
+			}
 			select {
-			case jobs <- e:
+			case jobs <- job:
 			case <-ctx.Done():
 				return
 			}
@@ -308,26 +371,26 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 // =======================
 
 func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
-	job.Symbol = utils.NormalizeStockSymbol(job.Symbol)
-	log := logrus.WithField("symbol", job.Symbol)
+	symbol := utils.NormalizeStockSymbol(job.Symbol)
+	log := logrus.WithField("symbol", symbol)
 
-	newPrice, fetchErr := s.fetcher.GetLatestPrice(job.Symbol, job.OldPrice)
-
-	// Log price fetch result
-	if fetchErr != nil {
-		log.WithError(fetchErr).
-			WithField("old_price", job.OldPrice).
-			WithField("new_price", newPrice).
-			Warn("Price fetch failed - using fallback price")
-	} else {
-		log.WithField("old_price", job.OldPrice).
-			WithField("new_price", newPrice).
-			Info("Price fetched successfully")
+	quote, err := s.provider.GetQuote(ctx, symbol)
+	if err != nil {
+		log.WithError(err).
+			WithField("provider", s.provider.Name()).
+			WithField("old_price", job.OldPrice.String()).
+			Warn("Price fetch failed - keeping last known price")
+		return
 	}
 
-	priceChanged := newPrice != job.OldPrice
+	if quote.Symbol != symbol {
+		log.WithFields(logrus.Fields{
+			"provider":     s.provider.Name(),
+			"quote_symbol": quote.Symbol,
+		}).Error("Provider returned a quote for an unexpected symbol -- discarding")
+		return
+	}
 
-	// Acquire DB semaphore
 	select {
 	case s.dbSem <- struct{}{}:
 		defer func() { <-s.dbSem }()
@@ -335,112 +398,43 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 		return
 	}
 
-	// Update the latest price only when it changed. History is written on every
-	// cycle so a day with an unchanged price still has a daily history row.
-	if priceChanged {
-		if err := s.updatePrice(ctx, job.Symbol, newPrice); err != nil {
-			log.WithError(err).Error("DB price update failed -- cache not updated")
-			return
-		}
-	}
-
-	// Update cache
-	s.cache.SetPrice(job.Symbol, newPrice, s.opts.Now())
-
-	if priceChanged {
-		log.WithFields(logrus.Fields{
-			"old_price": job.OldPrice,
-			"new_price": newPrice,
-			"change":    utils.RoundAmountFloat(newPrice - job.OldPrice),
-		}).Info("Price updated successfully")
-	} else {
-		log.WithField("price", newPrice).Debug("Price unchanged, recording daily history")
-	}
-
-	// Insert history
-	if err := s.insertHistory(ctx, job.Symbol, newPrice); err != nil {
-		log.WithError(err).Error("History insert failed")
-	}
-}
-
-// =======================
-// DB helpers
-// =======================
-
-func (s *PriceService) querySymbolPrices(ctx context.Context) ([]PriceJob, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT stock_symbol, price, updated_at FROM stock_prices`)
+	result, err := s.store.SaveQuote(ctx, quote)
 	if err != nil {
-		return nil, fmt.Errorf("querySymbolPrices: %w", err)
+		log.WithError(err).
+			WithField("provider", quote.Source).
+			WithField("quote_as_of", quote.AsOf).
+			Error("Price save failed -- cache not updated")
+		return
 	}
-	defer rows.Close()
-
-	var entries []PriceJob
-	for rows.Next() {
-		var e PriceJob
-		if err := rows.Scan(&e.Symbol, &e.OldPrice, &e.UpdatedAt); err != nil {
-			logrus.WithError(err).Warn("Skipping malformed row in stock_prices")
-			continue
-		}
-		e.Symbol = utils.NormalizeStockSymbol(e.Symbol)
-		entries = append(entries, e)
+	if !result.CurrentAccepted {
+		log.WithFields(logrus.Fields{
+			"provider":    quote.Source,
+			"price":       quote.Price.String(),
+			"quote_as_of": quote.AsOf,
+		}).Info("Quote ignored because a newer or higher-precedence price already exists")
+		return
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("querySymbolPrices row iteration: %w", err)
+
+	s.cache.SetPrice(symbol, quote.Price, quote.AsOf)
+
+	if quote.Price.Equal(job.OldPrice) {
+		log.WithFields(logrus.Fields{
+			"provider":        quote.Source,
+			"price":           quote.Price.String(),
+			"quote_as_of":     quote.AsOf,
+			"fetched_at":      quote.FetchedAt,
+			"history_changed": result.HistoryChanged,
+		}).Debug("Price unchanged, quote timestamp and provenance refreshed")
+		return
 	}
-	return entries, nil
-}
 
-func (s *PriceService) updatePrice(ctx context.Context, symbol string, price float64) error {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		_, lastErr = s.db.ExecContext(ctx,
-			`UPDATE stock_prices SET price=$1, updated_at=NOW() WHERE stock_symbol=$2`,
-			price, symbol,
-		)
-		if lastErr == nil {
-			return nil
-		}
-
-		logrus.WithField("symbol", symbol).
-			WithField("attempt", attempt+1).
-			WithError(lastErr).Warn("updatePrice retry")
-		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		}
-	}
-	return fmt.Errorf("updatePrice %s: all 3 attempts failed: %w", symbol, lastErr)
-}
-
-func (s *PriceService) insertHistory(ctx context.Context, symbol string, price float64) error {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		_, lastErr = s.db.ExecContext(ctx, `
-			INSERT INTO stock_price_history (stock_symbol, price, date)
-			VALUES ($1, $2, market_today())
-			ON CONFLICT (stock_symbol, date) DO UPDATE
-			SET price = EXCLUDED.price,
-			    created_at = NOW()
-		`, symbol, price)
-		if lastErr == nil {
-			return nil
-		}
-
-		logrus.WithField("symbol", symbol).
-			WithField("attempt", attempt+1).
-			WithError(lastErr).Warn("insertHistory retry")
-
-		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		}
-	}
-	return fmt.Errorf("insertHistory %s: all 3 attempts failed: %w", symbol, lastErr)
+	log.WithFields(logrus.Fields{
+		"provider":        quote.Source,
+		"old_price":       job.OldPrice.String(),
+		"new_price":       quote.Price.String(),
+		"change":          quote.Price.Sub(job.OldPrice).String(),
+		"quote_as_of":     quote.AsOf,
+		"fetched_at":      quote.FetchedAt,
+		"history_changed": result.HistoryChanged,
+	}).Info("Price updated successfully")
 }

@@ -24,6 +24,8 @@ import (
 	"github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	routes "github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	"github.com/LoganX64/stocky-api/internal/jobs"
+	"github.com/LoganX64/stocky-api/internal/marketcal"
+	"github.com/LoganX64/stocky-api/internal/marketdata"
 )
 
 func main() {
@@ -69,15 +71,41 @@ func main() {
 	// =======================
 	// Background Price Job
 	// =======================
-	cache := jobs.NewPriceCache()
-	fetcher := jobs.NewRandomPriceFetcher()
-	priceService := jobs.NewPriceService(db, cache, fetcher, nil)
-
 	priceServiceDone := make(chan struct{})
-	go func() {
-		defer close(priceServiceDone)
-		priceService.Start(ctx)
-	}()
+	if cfg.MarketData.Enabled {
+		provider, err := newQuoteProvider(cfg.MarketData)
+		if err != nil {
+			logrus.Fatalf("market data provider setup failed: %v", err)
+		}
+
+		calendar, err := marketcal.DefaultWithOverrides(cfg.MarketData.Holidays)
+		if err != nil {
+			logrus.Fatalf("market calendar setup failed: %v", err)
+		}
+
+		freshness := marketcal.DefaultFreshnessPolicy(calendar)
+		freshness.MaxStale = cfg.MarketData.MaxStale
+		freshness.CloseGrace = cfg.MarketData.CloseGrace
+
+		cache := jobs.NewPriceCache()
+		store := jobs.NewPriceStore(db, nil)
+		priceService := jobs.NewPriceService(store, cache, provider, &jobs.PriceServiceOptions{
+			TickInterval:    cfg.MarketData.TickInterval,
+			MarketHoursOnly: cfg.MarketData.MarketHoursOnly,
+			FinalQuoteDelay: cfg.MarketData.FinalQuoteDelay,
+			Calendar:        calendar,
+			Freshness:       freshness,
+		})
+
+		logrus.WithField("provider", provider.Name()).Info("Market data provider configured")
+		go func() {
+			defer close(priceServiceDone)
+			priceService.Start(ctx)
+		}()
+	} else {
+		logrus.Info("Market data jobs disabled by MARKET_DATA_ENABLED=false")
+		close(priceServiceDone)
+	}
 
 	// =======================
 	// Background Corporate Action Job
@@ -192,6 +220,46 @@ func setupDB(cfg *config.Config) (*sql.DB, error) {
 // =======================
 // Migrations
 // =======================
+
+// =======================
+// Market Data Provider
+// =======================
+
+func newQuoteProvider(md config.MarketData) (marketdata.QuoteProvider, error) {
+	switch md.Provider {
+	case "simulator":
+		provider, err := marketdata.NewSimulatorWithOptions(marketdata.SimulatorOptions{
+			Exchange:     md.Exchange,
+			SymbolSuffix: md.SymbolSuffix,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
+	case "yahoo":
+		mapper, err := marketdata.NewSymbolMapper(md.Exchange, md.SymbolSuffix)
+		if err != nil {
+			return nil, err
+		}
+		provider, err := marketdata.NewYahooProvider(marketdata.YahooOptions{
+			BaseURL: md.YahooBaseURL,
+			Mapper:  mapper,
+			HTTP: marketdata.HTTPOptions{
+				Timeout:     md.HTTPTimeout,
+				MaxAttempts: md.MaxRetries,
+				RetryBase:   md.RetryBase,
+				RateLimit:   md.RateLimit,
+				UserAgent:   md.UserAgent,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
+	default:
+		return nil, fmt.Errorf("unsupported market data provider %q", md.Provider)
+	}
+}
 
 func runMigrations(dbURL, migrationPath string) error {
 	m, err := migrate.New("file://"+migrationPath, dbURL)

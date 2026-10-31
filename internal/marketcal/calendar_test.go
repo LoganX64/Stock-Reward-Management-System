@@ -103,6 +103,61 @@ func TestCalendarSessionHelpers(t *testing.T) {
 	}
 }
 
+func TestCalendarNextSessionOpen(t *testing.T) {
+	calendar := Default()
+
+	tests := []struct {
+		name string
+		when time.Time
+		want time.Time
+	}{
+		{
+			name: "before Monday open",
+			when: istTime(2026, time.November, 2, 8, 0),
+			want: istTime(2026, time.November, 2, 9, 15),
+		},
+		{
+			name: "at Monday open",
+			when: istTime(2026, time.November, 2, 9, 15),
+			want: istTime(2026, time.November, 2, 9, 15),
+		},
+		{
+			name: "during Monday session",
+			when: istTime(2026, time.November, 2, 10, 0),
+			want: istTime(2026, time.November, 3, 9, 15),
+		},
+		{
+			name: "after Monday close",
+			when: istTime(2026, time.November, 2, 16, 0),
+			want: istTime(2026, time.November, 3, 9, 15),
+		},
+		{
+			name: "Saturday",
+			when: istTime(2026, time.October, 31, 12, 0),
+			want: istTime(2026, time.November, 2, 9, 15),
+		},
+		{
+			name: "Friday after close",
+			when: istTime(2026, time.October, 30, 16, 0),
+			want: istTime(2026, time.November, 2, 9, 15),
+		},
+		{
+			name: "Diwali holiday",
+			when: istTime(2026, time.November, 10, 10, 0),
+			want: istTime(2026, time.November, 11, 9, 15),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calendar.NextSessionOpen(tt.when)
+			if !got.Equal(tt.want) {
+				t.Errorf("NextSessionOpen(%s) = %s, want %s", tt.when.Format(time.RFC3339), got.Format(time.RFC3339), tt.want.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
 func TestCalendarWeekendPreviousSession(t *testing.T) {
 	calendar := Default()
 	saturday := istTime(2026, time.October, 31, 12, 0)

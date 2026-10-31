@@ -216,3 +216,22 @@ func (c *Calendar) LastCompletedSessionClose(t time.Time) time.Time {
 	}
 	return c.PreviousSessionClose(t)
 }
+
+// NextSessionOpen returns the next session open at or after t. Before the open
+// on a trading day it returns today's open; otherwise it returns the open of
+// the next trading day.
+func (c *Calendar) NextSessionOpen(t time.Time) time.Time {
+	local := t.In(c.Location())
+	if c.IsTradingDay(local) && !local.After(c.SessionOpen(local)) {
+		return c.SessionOpen(local)
+	}
+
+	day := c.Date(local)
+	for i := 0; i < 400; i++ {
+		day = day.AddDate(0, 0, 1)
+		if c.IsTradingDay(day) {
+			return c.SessionOpen(day)
+		}
+	}
+	return time.Time{}
+}
