@@ -25,6 +25,7 @@ func main() {
 		DROP FUNCTION IF EXISTS process_corporate_action_cash(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS sync_corporate_action_cash_trigger() CASCADE;
 		DROP FUNCTION IF EXISTS reward_corporate_action_cash_details(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS market_data_source_rank(TEXT) CASCADE;
 		DROP FUNCTION IF EXISTS reward_action_settlement(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_action_settlements(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS validate_stock_event_fraction() CASCADE;
