@@ -75,6 +75,13 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
+	freshness, err := h.getPortfolioFreshness(tx, userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch portfolio freshness")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		return
+	}
+
 	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
@@ -104,6 +111,9 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		"valuationComplete":   len(unpricedSymbols) == 0,
 		"unpricedPositions":   len(unpricedSymbols),
 		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
+		"stalePositions":      freshness.StalePositions,
+		"staleSymbols":        utils.OrEmpty(freshness.StaleSymbols),
+		"pricesFresh":         freshness.PricesFresh,
 		"cashProceeds":        utils.RoundAmount(cashProceeds),
 		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -63,6 +64,15 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 			"total_positions",
 			"valuation_date",
 		}).AddRow(10000.0, 1, "2026-10-28"))
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"stock_symbol",
+			"price_status",
+			"price_as_of",
+			"price_source",
+		}).AddRow("B", "available", time.Now(), "yahoo"))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).
@@ -147,6 +157,17 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 			"total_positions",
 			"valuation_date",
 		}).AddRow(5000.0, 2, "2026-10-28"))
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"stock_symbol",
+			"price_status",
+			"price_as_of",
+			"price_source",
+		}).
+			AddRow("B", "available", time.Now(), "yahoo").
+			AddRow("NEWCO", "missing", nil, nil))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).

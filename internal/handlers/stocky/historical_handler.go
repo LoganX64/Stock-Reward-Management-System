@@ -91,6 +91,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			inr_value,
 			price_status,
 			price_as_of,
+			price_source,
+			price_fetched_at,
 			outcome_type,
 			is_active,
 			delist_effective_date,
@@ -114,6 +116,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		var price decimal.NullDecimal
 		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
+		var priceSource sql.NullString
+		var priceFetchedAt sql.NullTime
 		var delistEffectiveDate sql.NullTime
 		if err := rows.Scan(
 			&rec.RewardDate,
@@ -125,6 +129,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			&inrValue,
 			&rec.PriceStatus,
 			&priceAsOf,
+			&priceSource,
+			&priceFetchedAt,
 			&rec.OutcomeType,
 			&rec.IsActive,
 			&delistEffectiveDate,
@@ -152,6 +158,14 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		if priceAsOf.Valid {
 			t := priceAsOf.Time.UTC()
 			rec.PriceAsOf = &t
+		}
+		if priceSource.Valid {
+			source := priceSource.String
+			rec.PriceSource = &source
+		}
+		if priceFetchedAt.Valid {
+			t := priceFetchedAt.Time.UTC()
+			rec.PriceFetchedAt = &t
 		}
 		if delistEffectiveDate.Valid {
 			d := delistEffectiveDate.Time.Format("2006-01-02")

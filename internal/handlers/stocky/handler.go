@@ -3,20 +3,179 @@ package stocky
 import (
 	"context"
 	"database/sql"
+	"time"
 
+	"github.com/LoganX64/stocky-api/internal/marketcal"
 	"github.com/shopspring/decimal"
 )
 
 // Handler holds all dependencies (mainly DB)
 type Handler struct {
 	DB *sql.DB
+
+	// Calendar and Freshness drive the calendar-aware staleness reported for
+	// current prices. They default to the NSE calendar and the shared A3
+	// policy so the API and the scheduler classify quotes identically.
+	Calendar  *marketcal.Calendar
+	Freshness marketcal.FreshnessPolicy
+
+	// Now is the clock used for freshness classification. It is injectable so
+	// tests and replays can produce deterministic freshness values.
+	Now func() time.Time
+}
+
+// Option customises a Handler without breaking existing NewHandler(db) calls.
+type Option func(*Handler)
+
+// WithCalendar sets the market calendar used for freshness classification.
+func WithCalendar(calendar *marketcal.Calendar) Option {
+	return func(h *Handler) {
+		if calendar == nil {
+			return
+		}
+		h.Calendar = calendar
+		h.Freshness.Calendar = calendar
+	}
+}
+
+// WithFreshness sets the freshness policy used for API responses.
+func WithFreshness(policy marketcal.FreshnessPolicy) Option {
+	return func(h *Handler) {
+		h.Freshness = policy
+		if h.Freshness.Calendar == nil {
+			h.Freshness.Calendar = h.Calendar
+		}
+	}
+}
+
+// WithClock overrides the clock used for freshness classification.
+func WithClock(now func() time.Time) Option {
+	return func(h *Handler) {
+		if now != nil {
+			h.Now = now
+		}
+	}
 }
 
 // NewHandler creates a new Handler instance with injected dependencies
-func NewHandler(db *sql.DB) *Handler {
-	return &Handler{
-		DB: db,
+func NewHandler(db *sql.DB, opts ...Option) *Handler {
+	calendar := marketcal.Default()
+	h := &Handler{
+		DB:        db,
+		Calendar:  calendar,
+		Freshness: marketcal.DefaultFreshnessPolicy(calendar),
+		Now:       time.Now,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	if h.Freshness.Calendar == nil {
+		h.Freshness.Calendar = h.Calendar
+	}
+	return h
+}
+
+// classifyPriceFreshness returns the freshness of a current-price row. Missing
+// and not-required rows have no freshness. An available row without a usable
+// timestamp, or with legacy/seed provenance, is explicitly "unknown" rather
+// than being reported as fresh.
+func (h *Handler) classifyPriceFreshness(priceStatus string, asOf sql.NullTime, source sql.NullString) *string {
+	if priceStatus != "available" {
+		return nil
+	}
+
+	freshness := marketcal.FreshnessUnknown
+	if asOf.Valid {
+		quoteSource := ""
+		if source.Valid {
+			quoteSource = source.String
+		}
+		freshness = h.Freshness.ClassifySource(quoteSource, asOf.Time, h.Now())
+	}
+
+	value := string(freshness)
+	return &value
+}
+
+// freshnessTally aggregates staleness over a set of current-price rows.
+// Missing rows are a valuation gap reported elsewhere, so they neither count as
+// stale nor make pricesFresh false. An unknown classification is not stale but
+// does make pricesFresh false.
+type freshnessTally struct {
+	stale   int
+	symbols []string
+	seen    map[string]struct{}
+	fresh   bool
+}
+
+func newFreshnessTally() *freshnessTally {
+	return &freshnessTally{
+		seen:  map[string]struct{}{},
+		fresh: true,
+	}
+}
+
+func (t *freshnessTally) add(symbol, priceStatus string, freshness *string) {
+	if priceStatus != "available" {
+		return
+	}
+	if freshness == nil || *freshness != string(marketcal.FreshnessFresh) {
+		t.fresh = false
+	}
+	if freshness == nil || *freshness != string(marketcal.FreshnessStale) {
+		return
+	}
+
+	t.stale++
+	if _, ok := t.seen[symbol]; ok {
+		return
+	}
+	t.seen[symbol] = struct{}{}
+	t.symbols = append(t.symbols, symbol)
+}
+
+// portfolioFreshness is the pagination-independent staleness summary for a
+// user's full current portfolio.
+type portfolioFreshness struct {
+	StalePositions int
+	StaleSymbols   []string
+	PricesFresh    bool
+}
+
+// getPortfolioFreshness classifies every current holding for the user, not just
+// the requested page. That keeps stalePositions and staleSymbols correct when
+// /portfolio is paginated.
+func (h *Handler) getPortfolioFreshness(q dbReader, userID int) (portfolioFreshness, error) {
+	rows, err := q.Query(`
+		SELECT stock_symbol, price_status, price_as_of, price_source
+		FROM user_portfolio
+		WHERE user_id = $1
+		ORDER BY stock_symbol
+	`, userID)
+	if err != nil {
+		return portfolioFreshness{}, err
+	}
+	defer rows.Close()
+
+	tally := newFreshnessTally()
+	for rows.Next() {
+		var symbol, priceStatus string
+		var priceAsOf sql.NullTime
+		var priceSource sql.NullString
+		if err := rows.Scan(&symbol, &priceStatus, &priceAsOf, &priceSource); err != nil {
+			return portfolioFreshness{}, err
+		}
+		tally.add(symbol, priceStatus, h.classifyPriceFreshness(priceStatus, priceAsOf, priceSource))
+	}
+	if err := rows.Err(); err != nil {
+		return portfolioFreshness{}, err
+	}
+
+	return portfolioFreshness{
+		StalePositions: tally.stale,
+		StaleSymbols:   tally.symbols,
+		PricesFresh:    tally.fresh,
+	}, nil
 }
 
 // dbReader is implemented by both *sql.DB and *sql.Tx. Reporting helpers use it

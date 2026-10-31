@@ -86,6 +86,8 @@ type HistoricalINR struct {
 	INRValue              decimal.NullDecimal `json:"inrValue"`
 	PriceStatus           string              `json:"priceStatus"`
 	PriceAsOf             *time.Time          `json:"priceAsOf"`
+	PriceSource           *string             `json:"priceSource"`
+	PriceFetchedAt        *time.Time          `json:"priceFetchedAt"`
 	OutcomeType           string              `json:"outcomeType"`
 	IsActive              bool                `json:"isActive"`
 	DelistEffectiveDate   *string             `json:"delistEffectiveDate"`
@@ -99,12 +101,15 @@ type TodayReward struct {
 }
 
 type PortfolioItem struct {
-	StockSymbol  string              `json:"stockSymbol"`
-	Quantity     decimal.Decimal     `json:"quantity"`
-	CurrentPrice decimal.NullDecimal `json:"currentPrice"`
-	INRValue     decimal.NullDecimal `json:"inrValue"`
-	PriceStatus  string              `json:"priceStatus"`
-	PriceAsOf    *time.Time          `json:"priceAsOf"`
+	StockSymbol    string              `json:"stockSymbol"`
+	Quantity       decimal.Decimal     `json:"quantity"`
+	CurrentPrice   decimal.NullDecimal `json:"currentPrice"`
+	INRValue       decimal.NullDecimal `json:"inrValue"`
+	PriceStatus    string              `json:"priceStatus"`
+	PriceAsOf      *time.Time          `json:"priceAsOf"`
+	PriceSource    *string             `json:"priceSource"`
+	PriceFetchedAt *time.Time          `json:"priceFetchedAt"`
+	PriceFreshness *string             `json:"priceFreshness"`
 }
 
 type TodayStock struct {
@@ -116,6 +121,9 @@ type TodayStock struct {
 	INRValue              decimal.NullDecimal `json:"inrValue"`
 	PriceStatus           string              `json:"priceStatus"`
 	PriceAsOf             *time.Time          `json:"priceAsOf"`
+	PriceSource           *string             `json:"priceSource"`
+	PriceFetchedAt        *time.Time          `json:"priceFetchedAt"`
+	PriceFreshness        *string             `json:"priceFreshness"`
 }
 
 type CreateRewardRequest struct {

@@ -30,6 +30,7 @@ import (
 
 func main() {
 	cfg := config.MustLoad()
+	logMarketDataConfig(cfg)
 
 	// =======================
 	// DB Setup
@@ -75,20 +76,24 @@ func main() {
 	priceServiceDone := make(chan struct{})
 	bhavcopyDone := make(chan struct{})
 
+	// The market calendar and freshness policy are shared by the scheduler, the
+	// EOD ingestion job, and the read API so staleness cannot drift between
+	// them. They are built even when background jobs are disabled because the
+	// API still classifies stored quotes.
+	calendar, err := marketcal.DefaultWithOverrides(cfg.MarketData.Holidays)
+	if err != nil {
+		logrus.Fatalf("market calendar setup failed: %v", err)
+	}
+
+	freshness := marketcal.DefaultFreshnessPolicy(calendar)
+	freshness.MaxStale = cfg.MarketData.MaxStale
+	freshness.CloseGrace = cfg.MarketData.CloseGrace
+
 	if cfg.MarketData.Enabled {
 		provider, err := newQuoteProvider(cfg.MarketData)
 		if err != nil {
 			logrus.Fatalf("market data provider setup failed: %v", err)
 		}
-
-		calendar, err := marketcal.DefaultWithOverrides(cfg.MarketData.Holidays)
-		if err != nil {
-			logrus.Fatalf("market calendar setup failed: %v", err)
-		}
-
-		freshness := marketcal.DefaultFreshnessPolicy(calendar)
-		freshness.MaxStale = cfg.MarketData.MaxStale
-		freshness.CloseGrace = cfg.MarketData.CloseGrace
 
 		cache := jobs.NewPriceCache()
 		priceService := jobs.NewPriceService(priceStore, cache, provider, &jobs.PriceServiceOptions{
@@ -126,7 +131,10 @@ func main() {
 	// HTTP Server
 	// =======================
 	r := gin.Default()
-	handler := stocky.NewHandler(db)
+	handler := stocky.NewHandler(db,
+		stocky.WithCalendar(calendar),
+		stocky.WithFreshness(freshness),
+	)
 	// Register routes with the handler
 	routes.Routes(r, handler)
 
@@ -340,6 +348,54 @@ func startBhavcopyService(
 		defer close(done)
 		service.Start(ctx)
 	}()
+}
+
+// logMarketDataConfig records the effective market-data configuration at
+// startup. It deliberately omits secrets and makes simulator mode and disabled
+// bhavcopy explicit so an operator can explain where prices come from.
+func logMarketDataConfig(cfg *config.Config) {
+	md := cfg.MarketData
+	logrus.WithFields(logrus.Fields{
+		"env":                     cfg.Env,
+		"market_data_enabled":     md.Enabled,
+		"provider":                md.Provider,
+		"exchange":                md.Exchange,
+		"symbol_suffix":           md.SymbolSuffix,
+		"tick_interval":           md.TickInterval.String(),
+		"market_hours_only":       md.MarketHoursOnly,
+		"final_quote_delay":       md.FinalQuoteDelay.String(),
+		"max_stale":               md.MaxStale.String(),
+		"close_grace":             md.CloseGrace.String(),
+		"http_timeout":            md.HTTPTimeout.String(),
+		"max_retries":             md.MaxRetries,
+		"retry_base":              md.RetryBase.String(),
+		"rate_limit":              md.RateLimit.String(),
+		"yahoo_base_url":          md.YahooBaseURL,
+		"bhavcopy_enabled":        md.BhavcopyEnabled,
+		"bhavcopy_base_url":       md.BhavcopyBaseURL,
+		"bhavcopy_time":           md.BhavcopyTime,
+		"bhavcopy_retry_until":    md.BhavcopyRetryUntil,
+		"bhavcopy_retry_interval": md.BhavcopyRetryInterval.String(),
+		"holiday_override_count":  len(md.Holidays),
+	}).Info("Market-data configuration loaded")
+
+	switch md.Provider {
+	case "simulator":
+		logrus.Warn("Simulator mode is active: prices are synthetic random-walk values, not Indian market data")
+		if md.BhavcopyEnabled {
+			logrus.Warn("Bhavcopy EOD ingestion will be skipped in simulator mode; set MARKET_DATA_BHAVCOPY_ENABLED=false to silence this warning")
+		}
+	case "yahoo":
+		if md.BhavcopyEnabled {
+			logrus.Info("Yahoo Finance provides unofficial, delayed current quotes; NSE bhavcopy supplies the official end-of-day close")
+		} else {
+			logrus.Info("Yahoo Finance provides unofficial, delayed current quotes; official NSE bhavcopy ingestion is disabled")
+		}
+	}
+
+	if !md.Enabled {
+		logrus.Info("Market-data background jobs are disabled by MARKET_DATA_ENABLED=false; stored prices will still be served with provenance and freshness")
+	}
 }
 
 func runMigrations(dbURL, migrationPath string) error {

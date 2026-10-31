@@ -22,6 +22,14 @@ type DailyCloseProvider interface {
 	GetDailyCloses(ctx context.Context, date time.Time, symbols []string) (map[string]Quote, error)
 }
 
+// HistoricalDailyCloseProvider returns raw archived closes for a past trading
+// date. It is separate from DailyCloseProvider so the live path keeps its
+// maximum-age validation while a backfill can import older dates.
+type HistoricalDailyCloseProvider interface {
+	Name() string
+	GetHistoricalDailyCloses(ctx context.Context, date time.Time, symbols []string) (map[string]Quote, error)
+}
+
 // ErrNoSession means a provider has no data for the requested trading session
 // yet, for example because an exchange file has not been published.
 var ErrNoSession = errors.New("marketdata: no session data available")

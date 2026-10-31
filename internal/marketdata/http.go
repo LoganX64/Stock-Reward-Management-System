@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -119,6 +121,14 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 			return nil, err
 		}
 
+		attemptFields := logrus.Fields{
+			"provider":     c.provider,
+			"url":          rawURL,
+			"attempt":      attempt,
+			"max_attempts": attempts,
+		}
+		started := c.opts.Now()
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("%s: build request: %w", c.provider, err)
@@ -129,14 +139,25 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 		}
 
 		resp, err := c.client.Do(req)
+		latency := c.opts.Now().Sub(started)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
+			logrus.WithFields(attemptFields).WithFields(logrus.Fields{
+				"event":      "fetch_failed",
+				"latency_ms": latency.Milliseconds(),
+				"retrying":   attempt < attempts,
+			}).WithError(err).Warn("Market-data HTTP request failed")
 			if attempt == attempts {
 				return nil, fmt.Errorf("%s: GET %s: %w", c.provider, rawURL, err)
 			}
-			if err := c.sleepBeforeRetry(ctx, attempt, 0); err != nil {
+			delay := c.retryDelay(attempt, 0)
+			logrus.WithFields(attemptFields).WithFields(logrus.Fields{
+				"event":          "fetch_retry",
+				"retry_delay_ms": delay.Milliseconds(),
+			}).Info("Retrying market-data HTTP request")
+			if err := c.opts.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
 			continue
@@ -144,28 +165,51 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 
 		body, truncated, readErr := readLimited(resp.Body, bodyLimit)
 		_ = resp.Body.Close()
+		latency = c.opts.Now().Sub(started)
 
 		if readErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
+			logrus.WithFields(attemptFields).WithFields(logrus.Fields{
+				"event":        "fetch_read_failed",
+				"status_code":  resp.StatusCode,
+				"latency_ms":   latency.Milliseconds(),
+				"response_len": len(body),
+				"retrying":     attempt < attempts,
+			}).WithError(readErr).Warn("Market-data HTTP response read failed")
 			if attempt == attempts {
 				return nil, fmt.Errorf("%s: read response: %w", c.provider, readErr)
 			}
-			if err := c.sleepBeforeRetry(ctx, attempt, 0); err != nil {
+			delay := c.retryDelay(attempt, 0)
+			logrus.WithFields(attemptFields).WithFields(logrus.Fields{
+				"event":          "fetch_retry",
+				"retry_delay_ms": delay.Milliseconds(),
+			}).Info("Retrying market-data HTTP request")
+			if err := c.opts.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
 			continue
 		}
 
+		responseFields := logrus.Fields{
+			"status_code":  resp.StatusCode,
+			"latency_ms":   latency.Milliseconds(),
+			"response_len": len(body),
+		}
+
 		if resp.StatusCode == http.StatusOK {
 			if truncated {
+				logrus.WithFields(attemptFields).WithFields(responseFields).WithField("truncated", true).
+					Error("Market-data HTTP response exceeded the configured body limit")
 				return nil, &ValidationError{
 					Provider: c.provider,
 					Field:    "body",
 					Reason:   fmt.Sprintf("response body exceeds %d bytes", bodyLimit),
 				}
 			}
+			logrus.WithFields(attemptFields).WithFields(responseFields).WithField("event", "fetch_succeeded").
+				Debug("Market-data HTTP request succeeded")
 			return body, nil
 		}
 
@@ -177,6 +221,11 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 		}
 
 		if !IsRetryableStatus(resp.StatusCode) || attempt == attempts {
+			logrus.WithFields(attemptFields).WithFields(responseFields).WithFields(logrus.Fields{
+				"event":      "fetch_failed",
+				"retryable":  IsRetryableStatus(resp.StatusCode),
+				"body_bytes": len(body),
+			}).WithError(httpErr).Error("Market-data HTTP request failed")
 			return nil, httpErr
 		}
 
@@ -184,7 +233,13 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), c.opts.Now())
 		}
-		if err := c.sleepBeforeRetry(ctx, attempt, retryAfter); err != nil {
+		delay := c.retryDelay(attempt, retryAfter)
+		logrus.WithFields(attemptFields).WithFields(responseFields).WithFields(logrus.Fields{
+			"event":          "fetch_retry",
+			"retry_delay_ms": delay.Milliseconds(),
+			"retry_after_ms": retryAfter.Milliseconds(),
+		}).Warn("Market-data HTTP request returned a retryable status")
+		if err := c.opts.Sleep(ctx, delay); err != nil {
 			return nil, err
 		}
 	}
@@ -193,25 +248,31 @@ func (c *HTTPClient) Get(ctx context.Context, rawURL, accept string, bodyLimit i
 }
 
 func (c *HTTPClient) sleepBeforeRetry(ctx context.Context, attempt int, retryAfter time.Duration) error {
+	return c.opts.Sleep(ctx, c.retryDelay(attempt, retryAfter))
+}
+
+// retryDelay returns the capped, jittered delay before the next attempt.
+func (c *HTTPClient) retryDelay(attempt int, retryAfter time.Duration) time.Duration {
 	delay := retryAfter
 	if delay > 0 {
 		if delay > c.opts.MaxRetryAfter {
 			delay = c.opts.MaxRetryAfter
 		}
-	} else {
-		delay = c.opts.RetryBase * time.Duration(1<<uint(attempt-1))
-		if delay > c.opts.MaxRetryDelay {
-			delay = c.opts.MaxRetryDelay
-		}
-		delay = c.opts.Jitter(delay)
-		if delay > c.opts.MaxRetryDelay {
-			delay = c.opts.MaxRetryDelay
-		}
+		return delay
+	}
+
+	delay = c.opts.RetryBase * time.Duration(1<<uint(attempt-1))
+	if delay > c.opts.MaxRetryDelay {
+		delay = c.opts.MaxRetryDelay
+	}
+	delay = c.opts.Jitter(delay)
+	if delay > c.opts.MaxRetryDelay {
+		delay = c.opts.MaxRetryDelay
 	}
 	if delay < 0 {
 		delay = 0
 	}
-	return c.opts.Sleep(ctx, delay)
+	return delay
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {

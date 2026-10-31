@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -292,6 +293,71 @@ func (s *PriceService) initializeCache(ctx context.Context) (CurrentPrice, bool)
 }
 
 // =======================
+// Cycle accounting
+// =======================
+
+// priceCycleSequence gives every scheduler cycle a stable ID that can be used
+// to correlate worker, provider, and database log lines.
+var priceCycleSequence atomic.Uint64
+
+func newPriceCycleID(now time.Time) string {
+	return fmt.Sprintf("%s-%d", now.UTC().Format("20060102T150405.000Z"), priceCycleSequence.Add(1))
+}
+
+type cycleCounts struct {
+	Fetched        int
+	Saved          int
+	Ignored        int
+	Failed         int
+	HistoryChanged int
+}
+
+const (
+	cycleFetched = iota
+	cycleSaved
+	cycleIgnored
+	cycleFailed
+	cycleHistoryChanged
+)
+
+// cycleStats is shared by all workers in one cycle. A nil receiver is allowed
+// so direct processJob callers (tests) do not need to provide accounting.
+type cycleStats struct {
+	mu     sync.Mutex
+	counts cycleCounts
+}
+
+func (c *cycleStats) record(outcome int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch outcome {
+	case cycleFetched:
+		c.counts.Fetched++
+	case cycleSaved:
+		c.counts.Saved++
+	case cycleIgnored:
+		c.counts.Ignored++
+	case cycleFailed:
+		c.counts.Failed++
+	case cycleHistoryChanged:
+		c.counts.HistoryChanged++
+	}
+}
+
+func (c *cycleStats) snapshot() cycleCounts {
+	if c == nil {
+		return cycleCounts{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts
+}
+
+// =======================
 // Worker pipeline
 // =======================
 
@@ -302,15 +368,29 @@ type PriceJob struct {
 }
 
 func (s *PriceService) updatePrices(ctx context.Context) {
+	started := s.opts.Now()
+	cycleID := newPriceCycleID(started)
+	log := logrus.WithFields(logrus.Fields{
+		"cycle_id": cycleID,
+		"provider": s.provider.Name(),
+	})
+
 	entries, err := s.store.ListCurrentPrices(ctx)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to fetch symbols -- skipping cycle")
+		log.WithError(err).WithField("event", "cycle_failed").
+			Error("Failed to fetch symbols -- skipping cycle")
 		return
 	}
 	if len(entries) == 0 {
-		logrus.Warn("No symbols found -- nothing to update")
+		log.WithField("event", "cycle_skipped").Warn("No symbols found -- nothing to update")
 		return
 	}
+
+	log.WithFields(logrus.Fields{
+		"event":   "cycle_started",
+		"symbols": len(entries),
+		"workers": s.opts.Workers,
+	}).Info("Price update cycle started")
 
 	bufSize := len(entries)
 	if bufSize > 100 {
@@ -318,10 +398,11 @@ func (s *PriceService) updatePrices(ctx context.Context) {
 	}
 	jobs := make(chan PriceJob, bufSize)
 
+	stats := &cycleStats{}
 	var wg sync.WaitGroup
 	for i := 0; i < s.opts.Workers; i++ {
 		wg.Add(1)
-		go s.worker(ctx, jobs, &wg)
+		go s.worker(ctx, jobs, &wg, cycleID, stats)
 	}
 
 	go func() {
@@ -341,13 +422,26 @@ func (s *PriceService) updatePrices(ctx context.Context) {
 	}()
 
 	wg.Wait()
+
+	counts := stats.snapshot()
+	log.WithFields(logrus.Fields{
+		"event":           "cycle_completed",
+		"symbols":         len(entries),
+		"fetched":         counts.Fetched,
+		"saved":           counts.Saved,
+		"ignored":         counts.Ignored,
+		"failed":          counts.Failed,
+		"history_changed": counts.HistoryChanged,
+		"duration_ms":     s.opts.Now().Sub(started).Milliseconds(),
+	}).Info("Price update cycle completed")
 }
 
-func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *sync.WaitGroup) {
+func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *sync.WaitGroup, cycleID string, stats *cycleStats) {
 	defer wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			logrus.WithField("panic", r).
+			logrus.WithField("cycle_id", cycleID).
+				WithField("panic", r).
 				WithField("stack", string(debug.Stack())).
 				Error("Panic recovered in price worker -- worker exiting cleanly")
 		}
@@ -359,7 +453,7 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 			if !ok {
 				return
 			}
-			s.processJob(ctx, job)
+			s.processJobWithCycle(ctx, job, cycleID, stats)
 		case <-ctx.Done():
 			return
 		}
@@ -371,20 +465,36 @@ func (s *PriceService) worker(ctx context.Context, jobs <-chan PriceJob, wg *syn
 // =======================
 
 func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
+	s.processJobWithCycle(ctx, job, "", nil)
+}
+
+func (s *PriceService) processJobWithCycle(ctx context.Context, job PriceJob, cycleID string, stats *cycleStats) {
 	symbol := utils.NormalizeStockSymbol(job.Symbol)
-	log := logrus.WithField("symbol", symbol)
+	fields := logrus.Fields{"symbol": symbol}
+	if cycleID != "" {
+		fields["cycle_id"] = cycleID
+	}
+	log := logrus.WithFields(fields)
 
 	quote, err := s.provider.GetQuote(ctx, symbol)
 	if err != nil {
+		stats.record(cycleFailed)
 		log.WithError(err).
-			WithField("provider", s.provider.Name()).
-			WithField("old_price", job.OldPrice.String()).
+			WithFields(logrus.Fields{
+				"event":     "fetch_failed",
+				"provider":  s.provider.Name(),
+				"old_price": job.OldPrice.String(),
+			}).
 			Warn("Price fetch failed - keeping last known price")
 		return
 	}
+	stats.record(cycleFetched)
 
 	if quote.Symbol != symbol {
+		stats.record(cycleFailed)
 		log.WithFields(logrus.Fields{
+			"event":        "quote_rejected",
+			"reason":       "symbol_mismatch",
 			"provider":     s.provider.Name(),
 			"quote_symbol": quote.Symbol,
 		}).Error("Provider returned a quote for an unexpected symbol -- discarding")
@@ -400,26 +510,52 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 
 	result, err := s.store.SaveQuote(ctx, quote)
 	if err != nil {
+		stats.record(cycleFailed)
 		log.WithError(err).
-			WithField("provider", quote.Source).
-			WithField("quote_as_of", quote.AsOf).
+			WithFields(logrus.Fields{
+				"event":           "quote_save_failed",
+				"provider":        quote.Source,
+				"provider_symbol": quote.ProviderSymbol,
+				"exchange":        quote.Exchange,
+				"currency":        quote.Currency,
+				"quote_as_of":     quote.AsOf,
+				"fetched_at":      quote.FetchedAt,
+			}).
 			Error("Price save failed -- cache not updated")
 		return
 	}
 	if !result.CurrentAccepted {
+		stats.record(cycleIgnored)
 		log.WithFields(logrus.Fields{
-			"provider":    quote.Source,
-			"price":       quote.Price.String(),
-			"quote_as_of": quote.AsOf,
+			"event":           "quote_ignored_older",
+			"db_result":       "rejected",
+			"provider":        quote.Source,
+			"provider_symbol": quote.ProviderSymbol,
+			"exchange":        quote.Exchange,
+			"currency":        quote.Currency,
+			"price":           quote.Price.String(),
+			"quote_as_of":     quote.AsOf,
+			"fetched_at":      quote.FetchedAt,
+			"history_changed": result.HistoryChanged,
 		}).Info("Quote ignored because a newer or higher-precedence price already exists")
 		return
+	}
+
+	stats.record(cycleSaved)
+	if result.HistoryChanged {
+		stats.record(cycleHistoryChanged)
 	}
 
 	s.cache.SetPrice(symbol, quote.Price, quote.AsOf)
 
 	if quote.Price.Equal(job.OldPrice) {
 		log.WithFields(logrus.Fields{
+			"event":           "quote_saved",
+			"db_result":       "unchanged",
 			"provider":        quote.Source,
+			"provider_symbol": quote.ProviderSymbol,
+			"exchange":        quote.Exchange,
+			"currency":        quote.Currency,
 			"price":           quote.Price.String(),
 			"quote_as_of":     quote.AsOf,
 			"fetched_at":      quote.FetchedAt,
@@ -429,7 +565,12 @@ func (s *PriceService) processJob(ctx context.Context, job PriceJob) {
 	}
 
 	log.WithFields(logrus.Fields{
+		"event":           "quote_saved",
+		"db_result":       "updated",
 		"provider":        quote.Source,
+		"provider_symbol": quote.ProviderSymbol,
+		"exchange":        quote.Exchange,
+		"currency":        quote.Currency,
 		"old_price":       job.OldPrice.String(),
 		"new_price":       quote.Price.String(),
 		"change":          quote.Price.Sub(job.OldPrice).String(),

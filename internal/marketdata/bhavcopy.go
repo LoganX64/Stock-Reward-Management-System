@@ -97,6 +97,18 @@ func (p *BhavcopyProvider) Name() string {
 // official close for every requested symbol that is present with SERIES=EQ.
 // Missing symbols are omitted from the map; their absence is not an error.
 func (p *BhavcopyProvider) GetDailyCloses(ctx context.Context, date time.Time, symbols []string) (map[string]Quote, error) {
+	return p.getCloses(ctx, date, symbols, false)
+}
+
+// GetHistoricalDailyCloses is the backfill variant of GetDailyCloses. It uses
+// the historical quote contract so an archive file older than the live
+// seven-day window can still be imported. The returned close is raw: corporate
+// actions are applied later by the adjusted views, never by this parser.
+func (p *BhavcopyProvider) GetHistoricalDailyCloses(ctx context.Context, date time.Time, symbols []string) (map[string]Quote, error) {
+	return p.getCloses(ctx, date, symbols, true)
+}
+
+func (p *BhavcopyProvider) getCloses(ctx context.Context, date time.Time, symbols []string, historical bool) (map[string]Quote, error) {
 	if date.IsZero() {
 		return nil, &ValidationError{
 			Provider: SourceNSEBhavcopy,
@@ -133,10 +145,10 @@ func (p *BhavcopyProvider) GetDailyCloses(ctx context.Context, date time.Time, s
 		return nil, err
 	}
 
-	return p.parse(body, marketDate, canonical)
+	return p.parse(body, marketDate, canonical, historical)
 }
 
-func (p *BhavcopyProvider) parse(body []byte, marketDate time.Time, symbols []string) (map[string]Quote, error) {
+func (p *BhavcopyProvider) parse(body []byte, marketDate time.Time, symbols []string, historical bool) (map[string]Quote, error) {
 	body = bytes.TrimPrefix(body, []byte("\ufeff"))
 
 	reader := csv.NewReader(bytes.NewReader(body))
@@ -234,7 +246,11 @@ func (p *BhavcopyProvider) parse(body []byte, marketDate time.Time, symbols []st
 			FetchedAt:      fetchedAt,
 			Source:         SourceNSEBhavcopy,
 		}
-		if err := quote.Validate(fetchedAt); err != nil {
+		validate := quote.Validate
+		if historical {
+			validate = quote.ValidateHistory
+		}
+		if err := validate(fetchedAt); err != nil {
 			return nil, err
 		}
 		result[symbol] = quote

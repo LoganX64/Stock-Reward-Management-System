@@ -14,6 +14,9 @@ const (
 	// SourceLegacy marks prices that predate provenance tracking. Kept here
 	// as a plain string so marketcal does not depend on provider packages.
 	SourceLegacy = "legacy"
+	// SourceSeed marks prices inserted by the development seed data. It is
+	// treated like legacy provenance: present, but not a real market quote.
+	SourceSeed = "seed"
 )
 
 const (
@@ -61,10 +64,11 @@ func (p FreshnessPolicy) normalized() FreshnessPolicy {
 }
 
 // ClassifySource applies the legacy/unknown-source rule before classifying a
-// quote timestamp. Prices with no provenance or legacy provenance are
+// quote timestamp. Prices with no provenance or legacy/seed provenance are
 // deliberately reported as unknown rather than fresh.
 func (p FreshnessPolicy) ClassifySource(source string, asOf, now time.Time) Freshness {
-	if source == "" || source == SourceLegacy {
+	switch source {
+	case "", SourceLegacy, SourceSeed:
 		return FreshnessUnknown
 	}
 	return p.Classify(asOf, now)

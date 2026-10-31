@@ -122,14 +122,16 @@ func TestGetHistoricalINR_ReturnsMissingHistoricalPrice(t *testing.T) {
 			"inr_value",
 			"price_status",
 			"price_as_of",
+			"price_source",
+			"price_fetched_at",
 			"outcome_type",
 			"is_active",
 			"delist_effective_date",
 			"cash_proceeds",
 			"written_off_quantity",
 		}).
-			AddRow("2026-10-27", 2, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Date(2026, 10, 27, 18, 30, 0, 0, time.FixedZone("IST", 5*3600+1800)), "active", true, nil, 0.0, 0.0).
-			AddRow("2026-10-26", 1, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil, "active", true, nil, 0.0, 0.0))
+			AddRow("2026-10-27", 2, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Date(2026, 10, 27, 18, 30, 0, 0, time.FixedZone("IST", 5*3600+1800)), "nse_bhavcopy", time.Date(2026, 10, 27, 13, 5, 0, 0, time.UTC), "active", true, nil, 0.0, 0.0).
+			AddRow("2026-10-26", 1, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil, nil, nil, "active", true, nil, 0.0, 0.0))
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT market_today()::TEXT")).
 		WillReturnRows(sqlmock.NewRows([]string{"market_today"}).AddRow("2026-10-28"))
@@ -215,6 +217,21 @@ func TestGetHistoricalINR_ReturnsMissingHistoricalPrice(t *testing.T) {
 	if available["priceAsOf"] != "2026-10-27T13:00:00Z" {
 		t.Errorf("expected priceAsOf normalized to UTC, got %v", available["priceAsOf"])
 	}
+	if available["priceSource"] != "nse_bhavcopy" {
+		t.Errorf("expected priceSource nse_bhavcopy, got %v", available["priceSource"])
+	}
+	if available["priceFetchedAt"] != "2026-10-27T13:05:00Z" {
+		t.Errorf("expected priceFetchedAt normalized to UTC, got %v", available["priceFetchedAt"])
+	}
+	if available["priceFreshness"] != nil {
+		t.Errorf("historical rows must not expose priceFreshness, got %v", available["priceFreshness"])
+	}
+	if missing["priceSource"] != nil {
+		t.Errorf("expected priceSource null, got %v", missing["priceSource"])
+	}
+	if missing["priceFetchedAt"] != nil {
+		t.Errorf("expected priceFetchedAt null, got %v", missing["priceFetchedAt"])
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("there were unfulfilled expectations: %v", err)
@@ -252,14 +269,16 @@ func TestGetHistoricalINR_AsOfKeepsDelistedReward(t *testing.T) {
 			"inr_value",
 			"price_status",
 			"price_as_of",
+			"price_source",
+			"price_fetched_at",
 			"outcome_type",
 			"is_active",
 			"delist_effective_date",
 			"cash_proceeds",
 			"written_off_quantity",
 		}).
-			AddRow("2026-09-15", 5, "OLDCO", 0.0, nil, 0.0, 0.0, "not_required", nil, "write_off", false, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC), 0.0, 100.0).
-			AddRow("2026-09-10", 6, "CASHCO", 0.0, nil, 0.0, 0.0, "not_required", nil, "cash_exit", false, time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC), 5000.0, 0.0))
+			AddRow("2026-09-15", 5, "OLDCO", 0.0, nil, 0.0, 0.0, "not_required", nil, nil, nil, "write_off", false, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC), 0.0, 100.0).
+			AddRow("2026-09-10", 6, "CASHCO", 0.0, nil, 0.0, 0.0, "not_required", nil, nil, nil, "cash_exit", false, time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC), 5000.0, 0.0))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND price_status = 'missing'")).
 		WithArgs(1, asOf).

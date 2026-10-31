@@ -34,7 +34,9 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 - Apply effective-dated quantity movements so post-split corrections are not scaled twice.
 - Paginate historical INR and portfolio endpoints.
 - Track request IDs for logs.
-- Run a simulated background price updater with worker concurrency and database retry logic.
+- Fetch delayed current quotes from Yahoo Finance and official end-of-day closes from NSE bhavcopy.
+- Store and expose price provenance (`priceSource`, `priceFetchedAt`) and calendar-aware freshness (`priceFreshness`, `staleSymbols`, `pricesFresh`).
+- Keep the simulator available for offline development and testing.
 
 ---
 
@@ -96,6 +98,8 @@ Example response:
       "inrValue": null,
       "priceStatus": "missing",
       "priceAsOf": null,
+      "priceSource": null,
+      "priceFetchedAt": null,
       "outcomeType": "active",
       "isActive": true,
       "delistEffectiveDate": null,
@@ -125,6 +129,9 @@ Portfolio responses use the same pagination metadata:
   "valuationComplete": true,
   "unpricedPositions": 0,
   "unpricedSymbols": [],
+  "stalePositions": 0,
+  "staleSymbols": [],
+  "pricesFresh": true,
   "cashProceeds": 0,
   "cashInLieuProceeds": 0,
   "writtenOffQuantity": 0
@@ -135,13 +142,13 @@ Portfolio responses use the same pagination metadata:
 
 `cashProceeds` is the total cash received from merger consideration, cash-in-lieu fraction settlement, and cash-exit delistings. `cashInLieuProceeds` is the subset produced by fractional-share settlement. `writtenOffQuantity` is the quantity removed by write-off delistings. All three are zero when the user has no terminal corporate-action outcomes.
 
-A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the price row's last update timestamp normalized to UTC.
+A holding is never dropped because its current price is missing. When no `stock_prices` row exists for a holding's terminal symbol, the row is still returned with `priceStatus: "missing"`, `currentPrice: null`, `inrValue: null`, and `priceAsOf: null`. The response then reports `valuationComplete: false`, `unpricedPositions`, and the affected `unpricedSymbols`. For priced holdings, `priceStatus` is `"available"`, and `priceAsOf` contains the provider quote time normalized to UTC. `priceSource` identifies the provider (`yahoo`, `nse_bhavcopy`, `simulator`, `legacy`, or `seed`), `priceFetchedAt` is when Stocky received the quote, and `priceFreshness` is `fresh`, `stale`, or `unknown` (null for `missing`/`not_required`). `stalePositions` and `staleSymbols` cover the user's full portfolio, not just the requested page. `pricesFresh` is true only when every available price is fresh; an `unknown` price makes it false, while missing prices are reported separately through `valuationComplete`.
 
-`/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`.
+`/today-stocks` applies the same rule per reward: an unpriced reward remains in `stocks` with a null price/value and is counted in `unpricedRewards` and `unpricedSymbols`. It also returns `staleRewards`, `staleSymbols`, and `pricesFresh` for the full reward set.
 
-Historical rewards use the same explicit-gap rule. In grant-date mode, when `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. With `asOf`, the price is looked up on that date instead. `priceStatus` is `"not_required"` when the effective quantity is zero (for example after a terminal delist or a full reversal); that is a closed position, not a valuation gap. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete set at the same grant-date or `asOf` reference, not just the requested page. For available prices, `priceStatus` is `"available"` and `priceAsOf` is the history row's last write timestamp normalized to UTC. An `asOf` date is validated against `market_today()` inside the same read snapshot, so it cannot be in the future in any server timezone.
+Historical rewards use the same explicit-gap rule. In grant-date mode, when `stock_price_history` has no row for a reward's date and terminal symbol, the reward remains in `history` with `priceStatus: "missing"`, `price: null`, `inrValue: null`, and `priceAsOf: null`. With `asOf`, the price is looked up on that date instead. `priceStatus` is `"not_required"` when the effective quantity is zero (for example after a terminal delist or a full reversal); that is a closed position, not a valuation gap. The `/historical-inr` response returns `valuationComplete`, `unpricedRewards`, and `unpricedSymbols` for the user's complete set at the same grant-date or `asOf` reference, not just the requested page. For available prices, `priceStatus` is `"available"`, `priceAsOf` is the provider quote time normalized to UTC, and `priceSource`/`priceFetchedAt` identify where and when the close was obtained. Historical rows do not expose `priceFreshness`, because a historical close is not expected to be current. An `asOf` date is validated against `market_today()` inside the same read snapshot, so it cannot be in the future in any server timezone.
 
-`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, the full-set `totalPositions`, `valuationDate`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals as `/portfolio`. Its reads run in the same read-only snapshot, so `/stats` and `/portfolio` agree on the active symbol set, total value, position count, and valuation date. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value.
+`/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, the full-set `totalPositions`, `valuationDate`, the same `stalePositions`, `staleSymbols`, and `pricesFresh` fields as `/portfolio`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals as `/portfolio`. Its reads run in the same read-only snapshot, so `/stats` and `/portfolio` agree on the active symbol set, total value, position count, valuation date, and staleness summary. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value, and check `pricesFresh`/`staleSymbols` before treating it as current.
 
 ---
 
@@ -218,7 +225,7 @@ Migration `0023_case_normalized_instruments` makes instrument symbols canonical 
 
 ### Fee assumptions, precision, and rounding
 
-Stocky uses exact decimal arithmetic for the financial write path. Requests, PostgreSQL `NUMERIC` reads, notional and fee calculations, ledger values, and JSON responses all use `shopspring/decimal`; quantities and amounts are not converted through `float64` before they are stored. The simulated price updater is the only exception: its random walk uses `float64`, but the resulting price is rounded to 4 decimal places before storage.
+Stocky uses exact decimal arithmetic for the financial write path. Requests, PostgreSQL `NUMERIC` reads, notional and fee calculations, ledger values, and JSON responses all use `shopspring/decimal`; quantities and amounts are not converted through `float64` before they are stored. The simulator provider is the only exception: its random walk uses `float64`, but the resulting price is rounded to 4 decimal places before storage.
 
 **Storage precision**
 
@@ -376,6 +383,43 @@ Supported variables:
 - `HTTP_PORT` - API port.
 - `MIGRATION_PATH` - Path to database migrations.
 
+### Market-data variables
+
+`MARKET_DATA_PROVIDER=yahoo` is the default. The simulator remains available for offline development. Market-data durations use Go `time.ParseDuration` syntax (`60m`, `90m`, `1s`).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MARKET_DATA_ENABLED` | `true` | Master switch for quote and EOD background jobs. Stored prices are still served when false. |
+| `MARKET_DATA_PROVIDER` | `yahoo` | `yahoo` or `simulator`. |
+| `MARKET_DATA_EXCHANGE` | `NSE` | `NSE` or `BSE`. Bhavcopy requires `NSE`. |
+| `MARKET_DATA_SYMBOL_SUFFIX` | `.NS` / `.BO` | Provider symbol suffix; derived from the exchange when empty. |
+| `MARKET_DATA_TICK_INTERVAL` | `60m` | Polling interval for current quotes. |
+| `MARKET_DATA_MARKET_HOURS_ONLY` | `true` | Restrict polling to the NSE session and one post-close quote. |
+| `MARKET_DATA_FINAL_QUOTE_DELAY` | `5m` | Delay after 15:30 IST before the final quote. |
+| `MARKET_DATA_MAX_STALE` | `90m` | Maximum quote age during a live session. |
+| `MARKET_DATA_CLOSE_GRACE` | `20m` | Allowed last-trade age after the close. |
+| `MARKET_DATA_HTTP_TIMEOUT` | `10s` | Provider HTTP timeout. |
+| `MARKET_DATA_MAX_RETRIES` | `3` | Maximum total attempts per HTTP request (1–10). |
+| `MARKET_DATA_RETRY_BASE` | `1s` | Base delay for exponential backoff. |
+| `MARKET_DATA_RATE_LIMIT` | `1s` | Minimum spacing between provider requests; `0` disables the client-side limiter. |
+| `MARKET_DATA_USER_AGENT` | Stocky user agent | `User-Agent` sent to providers. |
+| `MARKET_DATA_YAHOO_BASE_URL` | `https://query1.finance.yahoo.com` | Yahoo API base URL. |
+| `MARKET_DATA_BHAVCOPY_ENABLED` | `true` | Enable official NSE EOD ingestion. |
+| `MARKET_DATA_BHAVCOPY_BASE_URL` | `https://nsearchives.nseindia.com` | NSE archive base URL. |
+| `MARKET_DATA_BHAVCOPY_TIME` | `18:15` | First bhavcopy attempt (IST). |
+| `MARKET_DATA_BHAVCOPY_RETRY_UNTIL` | `20:30` | Last bhavcopy retry (IST). |
+| `MARKET_DATA_BHAVCOPY_RETRY_INTERVAL` | `30m` | Spacing between bhavcopy retries. |
+| `MARKET_HOLIDAYS` | empty | Additional NSE closures as comma-separated `YYYY-MM-DD` dates. |
+
+Configuration is validated at startup. Unsupported providers/exchanges, malformed URLs, invalid durations, invalid clock times, inverted bhavcopy retry windows, and bhavcopy enabled for a non-NSE exchange fail with an error naming the offending variable. The effective provider, schedule, exchange, and bhavcopy settings are logged at startup without secrets.
+
+Example offline configuration:
+
+```text
+MARKET_DATA_PROVIDER=simulator
+MARKET_DATA_BHAVCOPY_ENABLED=false
+```
+
 ---
 
 ## Testing
@@ -412,22 +456,35 @@ go test -v github.com/LoganX64/stocky-api/internal/handlers/stocky
 Test files in `internal/handlers/stocky/`:
 
 - `adjustment_test.go` - Tests adjustment validation and reversal ledger behavior.
-- `historical_test.go` - Tests historical endpoint validation and missing-history behavior.
+- `historical_test.go` - Tests historical endpoint validation, missing-history behavior, and provenance output.
 - `portfolio_test.go` - Tests portfolio endpoint validation, cash outcomes, and missing-price holdings.
 - `reward_handler_test.go` - Tests reward validation, route registration, idempotency, normalization, and fee ledger entries.
 - `stats_test.go` - Tests stats endpoint validation and incomplete-valuation reporting.
 - `todays_test.go` - Tests today's stock endpoint validation and missing-price rewards.
+- `freshness_test.go` - Tests provenance/freshness fields, null freshness for missing prices, unknown legacy/seed provenance, and full-set stale counts under pagination.
+
+Market-data and job tests cover:
+
+- quote validation, including historical-close validation that bypasses only the live maximum age;
+- Yahoo and bhavcopy parsing, HTTP retry/backoff, rate limiting, body limits, and 404 handling;
+- NSE calendar, session, holiday, weekend, and freshness behavior;
+- bhavcopy scheduling, retry windows, and precedence against Yahoo;
+- provider failure preserving the last known price and cache;
+- history backfill range walking, missing dates, per-date/per-symbol failures, and raw-close storage.
 
 ---
 
 ## Code Structure
 
 - `/cmd/stocky-api/main.go` - API entry point.
+- `/cmd/backfill-market-data/main.go` - Official NSE history backfill command.
 - `/cmd/reset-migrations.go` - Migration reset utility.
 - `/internal/config/` - Environment configuration.
 - `/internal/database/migrations/` - SQL migrations and views.
 - `/internal/handlers/stocky/` - HTTP handlers, route setup, and tests.
-- `/internal/jobs/` - Background price updater.
+- `/internal/jobs/` - Quote scheduler, bhavcopy EOD ingestion, history backfill, and corporate-action jobs.
+- `/internal/marketcal/` - NSE trading calendar and freshness policy.
+- `/internal/marketdata/` - Provider contracts, Yahoo/bhavcopy/simulator providers, and HTTP client.
 - `/internal/storage/models/` - Data models.
 - `/internal/utils/` - Rounding and JSON helpers.
 - `/internal/utils/response/` - JSON response helpers.
@@ -439,38 +496,135 @@ Test files in `internal/handlers/stocky/`:
 
 ## Price Update System
 
-The current price updater is a simulated updater for local development and testing. It does not call a real external market-data API.
+Stocky uses two complementary market-data paths:
 
-Current behavior:
+| Source | Used for | Timing | Nature |
+|---|---|---|---|
+| Yahoo Finance | current quotes | during the NSE session plus one final quote after the close | Unofficial and delayed, typically by about 15 minutes plus polling lag. It is **not** real-time tick data. |
+| NSE bhavcopy CSV | official end-of-day close and daily history | 18:15 IST, retried every 30 minutes until 20:30 IST | Official NSE archive. Authoritative for its market date. |
+| Simulator | local development and tests | each scheduler tick | Synthetic random walk. Never a real market price. |
 
-1. Reads symbols and prices from `stock_prices`.
-2. Uses `RandomPriceFetcher` to generate a new price from the last stored price.
-3. Sometimes simulates a fetch failure and returns a dampened fallback price.
-4. Updates `stock_prices` when the generated price differs from the stored price.
-5. Inserts or updates the current day's row in `stock_price_history` on every cycle, including when the price is unchanged.
-6. Stores recently updated prices in an in-memory `PriceCache`.
+`MARKET_DATA_PROVIDER=yahoo` is the default. `MARKET_DATA_PROVIDER=simulator` keeps the pipeline fully offline.
 
-Reliability features:
+### Scheduling
 
-- Worker pool for concurrent symbol processing.
-- Buffered-channel semaphore to limit concurrent database writes.
-- Retry logic for database updates and history inserts.
-- Panic recovery in update cycles and workers.
-- Context-aware shutdown.
+- The quote scheduler polls every `MARKET_DATA_TICK_INTERVAL` (default `60m`) while `MARKET_DATA_MARKET_HOURS_ONLY=true`.
+- It skips weekends and configured NSE holidays (`MARKET_HOLIDAYS`) and resumes at the next session open.
+- It runs one final quote at 15:30 IST + `MARKET_DATA_FINAL_QUOTE_DELAY` (default 5 minutes).
+- At startup it catches up when the latest stored quote is not classified as fresh. A failed cycle leaves the last known price untouched.
+- With `MARKET_DATA_MARKET_HOURS_ONLY=false`, it polls continuously at the configured interval for manual testing.
+- The bhavcopy job runs at `MARKET_DATA_BHAVCOPY_TIME` (default 18:15 IST) and retries every `MARKET_DATA_BHAVCOPY_RETRY_INTERVAL` until `MARKET_DATA_BHAVCOPY_RETRY_UNTIL` (default 20:30 IST). A startup after the first attempt performs one catch-up for the current market date; it does not recover earlier sessions (use the backfill command for that).
+- Bhavcopy ingestion is skipped in simulator mode and requires `MARKET_DATA_EXCHANGE=NSE`.
 
-### Seeding and backfilling price history
+### Source precedence
 
-Migration `0020_missing_historical_prices` adds a supported database function that fills missing history rows from the latest known `stock_prices` values:
+Current-price and history writes use the same deterministic rules:
+
+- `nse_bhavcopy` is authoritative for its market date. A Yahoo or simulator quote for the same date cannot replace it.
+- Bhavcopy may replace a Yahoo/simulator quote for the same date, even when Yahoo's timestamp is slightly later.
+- A quote from a later market date can take over the current price.
+- For equal timestamps, source rank is `nse_bhavcopy > yahoo > simulator > legacy/seed`.
+- A rejected quote does not update the cache and is logged as `quote_ignored_older`.
+- History rows are keyed by `(symbol, market_date(quote_time))`; a late fetch cannot move a quote into the wrong day.
+
+### Provenance and freshness in responses
+
+Current-price rows expose:
+
+- `priceSource` - `yahoo`, `nse_bhavcopy`, `simulator`, `legacy`, or `seed`.
+- `priceAsOf` - provider quote time, normalized to UTC.
+- `priceFetchedAt` - when Stocky received the quote, normalized to UTC.
+- `priceFreshness` - `fresh`, `stale`, or `unknown`; `null` when `priceStatus` is `missing` or `not_required`.
+
+Historical rows expose `priceSource` and `priceFetchedAt` but no freshness flag, because a historical close is not expected to be current.
+
+Example current row:
+
+```json
+{
+  "stockSymbol": "TCS",
+  "currentPrice": 2502.6,
+  "priceStatus": "available",
+  "priceSource": "yahoo",
+  "priceAsOf": "2026-10-30T09:58:16Z",
+  "priceFetchedAt": "2026-10-30T10:00:05Z",
+  "priceFreshness": "fresh"
+}
+```
+
+The freshness policy is calendar-aware and shared with the scheduler:
+
+- During the session: fresh when the quote is at or after the open and no older than `MARKET_DATA_MAX_STALE`.
+- After the close: fresh when the quote is at or after 15:30 IST minus `MARKET_DATA_CLOSE_GRACE`.
+- Before the open, on weekends, and on holidays: the previous session's close is fresh.
+- A quote more than five minutes in the future is stale.
+- A row with no provenance or `legacy`/`seed` provenance is `unknown`, never `fresh`.
+
+Summary fields:
+
+- `/today-stocks` - `staleRewards`, `staleSymbols`, `pricesFresh`.
+- `/portfolio` and `/stats` - `stalePositions`, `staleSymbols`, `pricesFresh`.
+- Stale counts cover the full user set, not just the requested page.
+- `pricesFresh` is `true` only when every available price is `fresh`; `unknown` makes it `false`, while `missing`/`not_required` rows are not counted as stale.
+- `priceStatus` and `valuationComplete` keep their existing meaning: `valuationComplete` is about missing prices only, not stale ones.
+
+### Failure behavior
+
+- A provider error, timeout, non-2xx response, malformed payload, future timestamp, wrong currency/exchange, or symbol mismatch writes nothing.
+- The last known price and history remain in place; the cache is updated only after a successful database save.
+- The API keeps returning the stored price with its original provenance and freshness, so clients can see its age and whether it is fresh, stale, or unknown.
+- HTTP requests retry only for retryable statuses (`408`, `429`, and `5xx`) with capped exponential backoff, jitter, and `Retry-After` support. Other `4xx` responses fail immediately.
+- Logs are structured and include a `cycle_id` for scheduler cycles plus provider, symbol, attempt, HTTP status, latency, quote time, fetch time, and write outcome. Full response bodies and secrets are not logged.
+- Bhavcopy does not delete prices for symbols that are absent from the file. A 404 means "not published yet" and is retried within the evening window.
+
+### Simulator mode
+
+For offline development:
+
+```text
+MARKET_DATA_PROVIDER=simulator
+MARKET_DATA_BHAVCOPY_ENABLED=false
+```
+
+The simulator generates a random walk from the last stored price and writes through the same validation, precedence, history, and provenance path as a real provider. Its prices are synthetic and must not be treated as market data. Bhavcopy ingestion is skipped in simulator mode.
+
+### Historical backfill
+
+The `backfill-market-data` command imports **raw official bhavcopy closes** into `stock_price_history` for an inclusive date range:
+
+```bash
+go run ./cmd/backfill-market-data -from 2026-01-01 -to 2026-10-30
+```
+
+Options:
+
+- `-from YYYY-MM-DD` - required first market date.
+- `-to YYYY-MM-DD` - last market date; defaults to yesterday.
+- `-symbols TCS,INFY` - optional comma-separated symbols; defaults to every symbol in `stock_prices`.
+
+Behavior:
+
+- Only `stock_price_history` is written; current prices are never changed.
+- The command walks NSE trading days, skips weekends/holidays, and imports each date's raw close.
+- Official `nse_bhavcopy` history is never overwritten by a different source. The shared precedence rules also let bhavcopy replace a non-official row for the same date.
+- A missing bhavcopy file is reported in `missingDates` and left as an explicit gap; no flat or synthetic price is fabricated.
+- Per-date and per-symbol failures are reported in `failed`; successful imports are kept, and the command exits non-zero when any failure occurred.
+- The close is the raw bhavcopy close. Splits and bonuses are applied later by `stock_price_history_adjusted`; using an adjusted vendor close would apply corporate actions twice.
+
+The older `backfill_price_history()` SQL helper still exists for demo data:
 
 ```sql
--- Seed today's missing history rows.
-SELECT backfill_price_history();
-
--- Seed a specific date.
 SELECT backfill_price_history('2026-10-27');
 ```
 
-The function only inserts symbol/date pairs that have no history row and returns the number of rows inserted. It uses the latest stored price, which is intended for local/demo data; real historical prices should be imported from an authoritative market-data source. `/historical-inr` still marks any remaining gap as `priceStatus: "missing"` rather than hiding the reward.
+It copies the latest known current price into missing history rows. Do not use it when real historical closes are required. `/historical-inr` still marks any remaining gap as `priceStatus: "missing"` rather than hiding the reward.
+
+### Rollback
+
+- To stop all market-data writes while continuing to serve stored prices: set `MARKET_DATA_ENABLED=false` and restart. The API still reports provenance and freshness for existing rows.
+- To return to a fully offline local pipeline: set `MARKET_DATA_PROVIDER=simulator` and `MARKET_DATA_BHAVCOPY_ENABLED=false`. This writes synthetic prices, so do not use it against production data.
+- To stop only official EOD ingestion: set `MARKET_DATA_BHAVCOPY_ENABLED=false`. Yahoo current quotes continue.
+- Migration `0025` is additive. Rolling it back drops the provenance columns and restores the pre-A3 price shape; export or record provenance first if it is needed for audit.
 
 ---
 
@@ -484,6 +638,8 @@ The function only inserts symbol/date pairs that have no history row and returns
 - **Negative quantities after adjustment** - Prevented by transactional validation.
 - **Rounding** - Quantities use 6 decimal places and INR amounts use 4. Fee and monetary calculations use exact decimal arithmetic in the write path, with documented half-away-from-zero rounding points. See **Fee assumptions, precision, and rounding**.
 - **Missing current prices** - `today_rewards` and `user_portfolio` use a left join to adjusted current prices. Unpriced rewards/holdings remain visible with `priceStatus: "missing"` and null price/value; `/portfolio` and `/stats` return `valuationComplete`, an unpriced count, and `unpricedSymbols`. `totalPortfolioValue` is priced-holdings-only.
+- **Stale current prices** - Priced rows expose `priceSource`, `priceAsOf`, `priceFetchedAt`, and `priceFreshness`. `/today-stocks` returns `staleRewards`, `staleSymbols`, and `pricesFresh`; `/portfolio` and `/stats` return `stalePositions`, `staleSymbols`, and `pricesFresh` for the full user set. Staleness does not change `priceStatus` or `valuationComplete`.
+- **Market-data provenance** - `stock_prices` and `stock_price_history` record the provider source, provider symbol, exchange, currency, quote time, and fetch time. `nse_bhavcopy` is authoritative for its market date; Yahoo/simulator quotes cannot replace it for that date.
 - **Missing historical prices** - `historical_rewards` left-joins adjusted reward-date prices. Unpriced rewards remain visible with `priceStatus: "missing"` and null price/value; `/historical-inr` returns full-set `valuationComplete`, `unpricedRewards`, and `unpricedSymbols`.
 - **Transaction safety** - Reward creation and adjustment workflows use transactions.
 

@@ -29,6 +29,29 @@ func TestQuoteValidate(t *testing.T) {
 	}
 }
 
+func TestQuoteValidateHistoryAllowsOldQuotes(t *testing.T) {
+	now := time.Date(2026, time.November, 2, 10, 0, 0, 0, time.UTC)
+	quote := validQuote(now)
+	quote.AsOf = now.Add(-90 * 24 * time.Hour)
+
+	if err := quote.Validate(now); err == nil {
+		t.Fatal("Validate accepted a quote outside the live maximum age")
+	}
+	if err := quote.ValidateHistory(now); err != nil {
+		t.Fatalf("ValidateHistory rejected an old historical quote: %v", err)
+	}
+}
+
+func TestQuoteValidateHistoryStillRejectsFutureQuotes(t *testing.T) {
+	now := time.Date(2026, time.November, 2, 10, 0, 0, 0, time.UTC)
+	quote := validQuote(now)
+	quote.AsOf = now.Add(6 * time.Minute)
+
+	if err := quote.ValidateHistory(now); err == nil {
+		t.Fatal("ValidateHistory accepted a quote too far in the future")
+	}
+}
+
 func TestQuoteValidateRejectsInvalidValues(t *testing.T) {
 	now := time.Date(2026, time.November, 2, 10, 0, 0, 0, time.UTC)
 

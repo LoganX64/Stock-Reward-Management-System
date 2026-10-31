@@ -419,3 +419,35 @@ func TestBhavcopyProviderFetchesOneFileForAllSymbols(t *testing.T) {
 		t.Errorf("HTTP requests = %d, want 1 for a batch request", got)
 	}
 }
+
+func TestBhavcopyProviderHistoricalClosesSkipLiveMaxAge(t *testing.T) {
+	historicalDate := time.Date(2020, time.January, 2, 15, 30, 0, 0, marketcal.Location())
+	rows := bhavcopyTestHeader +
+		"TCS, EQ, 02-Jan-2020, 2080.00, 2090.00, 2110.00, 2075.00, 2100.00, 2100.50, 2095.00, 1000, 10.00, 100, 500, 50.00\r\n"
+
+	provider, _ := newTestBhavcopyProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rows))
+	}, bhavcopyTestNow)
+
+	if _, err := provider.GetDailyCloses(context.Background(), historicalDate, []string{"TCS"}); err == nil {
+		t.Fatal("live GetDailyCloses accepted a quote older than the maximum age")
+	}
+
+	quotes, err := provider.GetHistoricalDailyCloses(context.Background(), historicalDate, []string{"TCS"})
+	if err != nil {
+		t.Fatalf("GetHistoricalDailyCloses() error = %v", err)
+	}
+	quote, ok := quotes["TCS"]
+	if !ok {
+		t.Fatal("GetHistoricalDailyCloses() did not return TCS")
+	}
+	if !quote.Price.Equal(decimal.RequireFromString("2100.50")) {
+		t.Errorf("historical close = %s, want the raw close 2100.50", quote.Price)
+	}
+	if quote.Source != SourceNSEBhavcopy {
+		t.Errorf("historical source = %q, want %q", quote.Source, SourceNSEBhavcopy)
+	}
+	if !quote.AsOf.Equal(time.Date(2020, time.January, 2, 15, 30, 0, 0, marketcal.Location()).UTC()) {
+		t.Errorf("historical AsOf = %s, want the 2020 session close", quote.AsOf)
+	}
+}

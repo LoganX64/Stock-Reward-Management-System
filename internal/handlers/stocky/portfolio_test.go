@@ -72,7 +72,9 @@ func TestPortfolioHandler_ReturnsHoldingsAndCashOutcome(t *testing.T) {
 			"inr_value",
 			"price_status",
 			"price_as_of",
-		}).AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now()))
+			"price_source",
+			"price_fetched_at",
+		}).AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now(), "yahoo", time.Now()))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).
@@ -85,6 +87,15 @@ func TestPortfolioHandler_ReturnsHoldingsAndCashOutcome(t *testing.T) {
 			"total_positions",
 			"valuation_date",
 		}).AddRow(10000.0, 1, "2026-10-28"))
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"stock_symbol",
+			"price_status",
+			"price_as_of",
+			"price_source",
+		}).AddRow("B", "available", time.Now(), "yahoo"))
 
 	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
 		WithArgs(1).
@@ -160,9 +171,11 @@ func TestPortfolioHandler_ReturnsMissingPriceHolding(t *testing.T) {
 			"inr_value",
 			"price_status",
 			"price_as_of",
+			"price_source",
+			"price_fetched_at",
 		}).
-			AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now()).
-			AddRow("NEWCO", 10.0, nil, nil, "missing", nil))
+			AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now(), "yahoo", time.Now()).
+			AddRow("NEWCO", 10.0, nil, nil, "missing", nil, nil, nil))
 
 	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
 		WithArgs(1).
@@ -175,6 +188,17 @@ func TestPortfolioHandler_ReturnsMissingPriceHolding(t *testing.T) {
 			"total_positions",
 			"valuation_date",
 		}).AddRow(10000.0, 2, "2026-10-28"))
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"stock_symbol",
+			"price_status",
+			"price_as_of",
+			"price_source",
+		}).
+			AddRow("B", "available", time.Now(), "yahoo").
+			AddRow("NEWCO", "missing", nil, nil))
 
 	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
 		WithArgs(1).

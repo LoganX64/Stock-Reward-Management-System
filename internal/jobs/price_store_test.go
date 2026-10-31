@@ -292,3 +292,76 @@ func TestListCurrentPricesReturnsQueryError(t *testing.T) {
 		t.Fatalf("unfulfilled expectations: %v", err)
 	}
 }
+
+func TestSaveHistoryQuoteWritesHistoryOnlyAndAcceptsOldDates(t *testing.T) {
+	store, mock := newPriceStoreMock(t)
+	quote := priceStoreTestQuote()
+	quote.AsOf = time.Date(2020, 1, 2, 10, 0, 0, 0, time.UTC)
+	quote.FetchedAt = priceStoreTestNow
+
+	mock.ExpectExec(upsertHistorySQL).
+		WithArgs(
+			quote.Symbol,
+			quote.Price,
+			quote.AsOf,
+			quote.AsOf,
+			quote.Source,
+			quote.FetchedAt,
+			quote.ProviderSymbol,
+			quote.Exchange,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	changed, err := store.SaveHistoryQuote(context.Background(), quote)
+	if err != nil {
+		t.Fatalf("SaveHistoryQuote returned error: %v", err)
+	}
+	if !changed {
+		t.Error("SaveHistoryQuote changed = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestSaveHistoryQuoteReportsPrecedenceRejection(t *testing.T) {
+	store, mock := newPriceStoreMock(t)
+	quote := priceStoreTestQuote()
+
+	mock.ExpectExec(upsertHistorySQL).
+		WithArgs(
+			quote.Symbol,
+			quote.Price,
+			quote.AsOf,
+			quote.AsOf,
+			quote.Source,
+			quote.FetchedAt,
+			quote.ProviderSymbol,
+			quote.Exchange,
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	changed, err := store.SaveHistoryQuote(context.Background(), quote)
+	if err != nil {
+		t.Fatalf("SaveHistoryQuote returned error: %v", err)
+	}
+	if changed {
+		t.Error("SaveHistoryQuote changed = true, want false when the existing row wins precedence")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestSaveHistoryQuoteRejectsFutureQuoteBeforeSQL(t *testing.T) {
+	store, mock := newPriceStoreMock(t)
+	quote := priceStoreTestQuote()
+	quote.AsOf = priceStoreTestNow.Add(6 * time.Minute)
+
+	if _, err := store.SaveHistoryQuote(context.Background(), quote); err == nil {
+		t.Fatal("SaveHistoryQuote returned nil error, want validation failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("invalid historical quote should not run SQL: %v", err)
+	}
+}

@@ -39,8 +39,20 @@ type Quote struct {
 }
 
 // Validate enforces the shared quote contract. Provider-specific parsers must
-// call this before returning a quote.
+// call this before returning a live quote.
 func (q Quote) Validate(now time.Time) error {
+	return q.validate(now, true)
+}
+
+// ValidateHistory enforces the same quote contract for a historical close
+// except for the maximum age. A backfill intentionally imports dates older than
+// DefaultQuoteMaxAge; future timestamps and every other invariant are still
+// rejected. Live quotes must keep using Validate.
+func (q Quote) ValidateHistory(now time.Time) error {
+	return q.validate(now, false)
+}
+
+func (q Quote) validate(now time.Time, enforceMaxAge bool) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -66,7 +78,7 @@ func (q Quote) Validate(now time.Time) error {
 	if q.AsOf.After(now.Add(DefaultQuoteFutureSkew)) {
 		return &ValidationError{Provider: q.Source, Field: "as_of", Reason: "quote time is too far in the future"}
 	}
-	if q.AsOf.Before(now.Add(-DefaultQuoteMaxAge)) {
+	if enforceMaxAge && q.AsOf.Before(now.Add(-DefaultQuoteMaxAge)) {
 		return &ValidationError{Provider: q.Source, Field: "as_of", Reason: "quote time is older than the accepted window"}
 	}
 	if q.FetchedAt.IsZero() {

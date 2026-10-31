@@ -158,6 +158,9 @@ func TestFreshnessUnknown(t *testing.T) {
 	if got := policy.ClassifySource("", istTime(2026, time.November, 2, 9, 30), now); got != FreshnessUnknown {
 		t.Errorf("ClassifySource(empty) = %s, want %s", got, FreshnessUnknown)
 	}
+	if got := policy.ClassifySource(SourceSeed, istTime(2026, time.November, 2, 9, 30), now); got != FreshnessUnknown {
+		t.Errorf("ClassifySource(seed) = %s, want %s", got, FreshnessUnknown)
+	}
 }
 
 func TestFreshnessSourceClassification(t *testing.T) {

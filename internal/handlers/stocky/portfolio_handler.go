@@ -47,7 +47,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 			p.current_price,
 			p.inr_value,
 			p.price_status,
-			p.price_as_of
+			p.price_as_of,
+			p.price_source,
+			p.price_fetched_at
 		FROM user_portfolio p
 		WHERE p.user_id = $1
 		ORDER BY p.stock_symbol
@@ -67,13 +69,17 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		var currentPrice decimal.NullDecimal
 		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
+		var priceSource sql.NullString
+		var priceFetchedAt sql.NullTime
 		if err := rows.Scan(
 			&item.StockSymbol,
 			&item.Quantity,
 			&currentPrice,
 			&inrValue,
 			&item.PriceStatus,
-			&priceAsOf); err != nil {
+			&priceAsOf,
+			&priceSource,
+			&priceFetchedAt); err != nil {
 			rows.Close()
 			logger.WithError(err).Error("Failed to scan portfolio data for user ")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
@@ -93,6 +99,15 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 			t := priceAsOf.Time.UTC()
 			item.PriceAsOf = &t
 		}
+		if priceSource.Valid {
+			source := priceSource.String
+			item.PriceSource = &source
+		}
+		if priceFetchedAt.Valid {
+			t := priceFetchedAt.Time.UTC()
+			item.PriceFetchedAt = &t
+		}
+		item.PriceFreshness = h.classifyPriceFreshness(item.PriceStatus, priceAsOf, priceSource)
 		portfolio = append(portfolio, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -121,6 +136,13 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		return
 	}
 
+	freshness, err := h.getPortfolioFreshness(tx, userID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to fetch portfolio freshness")
+		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		return
+	}
+
 	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(tx, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
@@ -145,6 +167,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"valuationComplete":   len(unpricedSymbols) == 0,
 		"unpricedPositions":   len(unpricedSymbols),
 		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
+		"stalePositions":      freshness.StalePositions,
+		"staleSymbols":        utils.OrEmpty(freshness.StaleSymbols),
+		"pricesFresh":         freshness.PricesFresh,
 		"cashProceeds":        utils.RoundAmount(cashProceeds),
 		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
 		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),

@@ -31,7 +31,9 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			total_adjustment_amount,
 			inr_value,
 			price_status,
-			price_as_of
+			price_as_of,
+			price_source,
+			price_fetched_at
 		FROM today_rewards
 		WHERE user_id = $1
 		ORDER BY stock_symbol, reward_event_id
@@ -47,11 +49,14 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 	var stocks []models.TodayStock
 	unpricedRewards := 0
 	unpricedSymbols := []string{}
+	freshness := newFreshnessTally()
 	for rows.Next() {
 		var s models.TodayStock
 		var currentPrice decimal.NullDecimal
 		var inrValue decimal.NullDecimal
 		var priceAsOf sql.NullTime
+		var priceSource sql.NullString
+		var priceFetchedAt sql.NullTime
 		if err := rows.Scan(
 			&s.RewardID,
 			&s.StockSymbol,
@@ -61,6 +66,8 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			&inrValue,
 			&s.PriceStatus,
 			&priceAsOf,
+			&priceSource,
+			&priceFetchedAt,
 		); err != nil {
 			logger.WithError(err).Error("scan error")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
@@ -84,6 +91,16 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			t := priceAsOf.Time.UTC()
 			s.PriceAsOf = &t
 		}
+		if priceSource.Valid {
+			source := priceSource.String
+			s.PriceSource = &source
+		}
+		if priceFetchedAt.Valid {
+			t := priceFetchedAt.Time.UTC()
+			s.PriceFetchedAt = &t
+		}
+		s.PriceFreshness = h.classifyPriceFreshness(s.PriceStatus, priceAsOf, priceSource)
+		freshness.add(s.StockSymbol, s.PriceStatus, s.PriceFreshness)
 
 		stocks = append(stocks, s)
 	}
@@ -99,5 +116,8 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 		"valuationComplete": unpricedRewards == 0,
 		"unpricedRewards":   unpricedRewards,
 		"unpricedSymbols":   utils.OrEmpty(unpricedSymbols),
+		"staleRewards":      freshness.stale,
+		"staleSymbols":      utils.OrEmpty(freshness.symbols),
+		"pricesFresh":       freshness.fresh,
 	})
 }

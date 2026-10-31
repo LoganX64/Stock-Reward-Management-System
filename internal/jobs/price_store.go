@@ -20,6 +20,13 @@ type PriceStore interface {
 	ListCurrentPrices(ctx context.Context) ([]CurrentPrice, error)
 }
 
+// HistoryStore persists historical closes without touching current prices. It
+// is used by the Phase 7 backfill command.
+type HistoryStore interface {
+	SaveHistoryQuote(ctx context.Context, quote marketdata.Quote) (bool, error)
+	ListCurrentPrices(ctx context.Context) ([]CurrentPrice, error)
+}
+
 // CurrentPrice is the stored current price for a tracked symbol together with
 // its quote time and provenance. It is used to seed the cache and decide
 // whether a startup catch-up cycle is needed.
@@ -52,6 +59,7 @@ type SQLPriceStore struct {
 }
 
 var _ PriceStore = (*SQLPriceStore)(nil)
+var _ HistoryStore = (*SQLPriceStore)(nil)
 
 // NewPriceStore creates a price store. The caller owns db.
 func NewPriceStore(db *sql.DB, opts *PriceStoreOptions) *SQLPriceStore {
@@ -252,4 +260,33 @@ func rowsChanged(result sql.Result) (bool, error) {
 		return false, err
 	}
 	return affected > 0, nil
+}
+
+// SaveHistoryQuote validates a historical close with the history-specific
+// contract and upserts only stock_price_history. It never changes the current
+// price. The shared history precedence rules keep nse_bhavcopy authoritative
+// for its market date and let a later non-bhavcopy quote win only when no
+// official close owns that date.
+func (s *SQLPriceStore) SaveHistoryQuote(ctx context.Context, quote marketdata.Quote) (bool, error) {
+	if err := quote.ValidateHistory(s.now()); err != nil {
+		return false, fmt.Errorf("validate historical quote for %s: %w", quote.Symbol, err)
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		upsertHistorySQL,
+		quote.Symbol,
+		quote.Price,
+		quote.AsOf,
+		quote.AsOf,
+		quote.Source,
+		quote.FetchedAt,
+		quote.ProviderSymbol,
+		quote.Exchange,
+	)
+	if err != nil {
+		return false, fmt.Errorf("upsert price history for %s: %w", quote.Symbol, err)
+	}
+
+	return rowsChanged(result)
 }

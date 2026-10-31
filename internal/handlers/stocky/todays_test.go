@@ -60,9 +60,11 @@ func TestGetTodayStocks_ReturnsMissingPriceReward(t *testing.T) {
 			"inr_value",
 			"price_status",
 			"price_as_of",
+			"price_source",
+			"price_fetched_at",
 		}).
-			AddRow(1, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Now()).
-			AddRow(2, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil))
+			AddRow(1, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Now(), "yahoo", time.Now()).
+			AddRow(2, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil, nil, nil))
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/today-stocks/1", nil)
 	w := httptest.NewRecorder()
