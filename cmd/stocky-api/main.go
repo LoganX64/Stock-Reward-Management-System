@@ -69,9 +69,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// =======================
-	// Background Price Job
+	// Background Price Jobs
 	// =======================
+	priceStore := jobs.NewPriceStore(db, nil)
 	priceServiceDone := make(chan struct{})
+	bhavcopyDone := make(chan struct{})
+
 	if cfg.MarketData.Enabled {
 		provider, err := newQuoteProvider(cfg.MarketData)
 		if err != nil {
@@ -88,8 +91,7 @@ func main() {
 		freshness.CloseGrace = cfg.MarketData.CloseGrace
 
 		cache := jobs.NewPriceCache()
-		store := jobs.NewPriceStore(db, nil)
-		priceService := jobs.NewPriceService(store, cache, provider, &jobs.PriceServiceOptions{
+		priceService := jobs.NewPriceService(priceStore, cache, provider, &jobs.PriceServiceOptions{
 			TickInterval:    cfg.MarketData.TickInterval,
 			MarketHoursOnly: cfg.MarketData.MarketHoursOnly,
 			FinalQuoteDelay: cfg.MarketData.FinalQuoteDelay,
@@ -102,9 +104,12 @@ func main() {
 			defer close(priceServiceDone)
 			priceService.Start(ctx)
 		}()
+
+		startBhavcopyService(ctx, cfg, priceStore, calendar, bhavcopyDone)
 	} else {
 		logrus.Info("Market data jobs disabled by MARKET_DATA_ENABLED=false")
 		close(priceServiceDone)
+		close(bhavcopyDone)
 	}
 
 	// =======================
@@ -165,6 +170,10 @@ func main() {
 	logrus.Info("Waiting for price service to stop...")
 	<-priceServiceDone
 	logrus.Info("Price service stopped")
+
+	logrus.Info("Waiting for bhavcopy service to stop...")
+	<-bhavcopyDone
+	logrus.Info("Bhavcopy service stopped")
 
 	logrus.Info("Waiting for corporate action processor to stop...")
 	<-corporateActionDone
@@ -259,6 +268,78 @@ func newQuoteProvider(md config.MarketData) (marketdata.QuoteProvider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported market data provider %q", md.Provider)
 	}
+}
+
+func newBhavcopyProvider(md config.MarketData) (marketdata.DailyCloseProvider, error) {
+	mapper, err := marketdata.NewSymbolMapper(md.Exchange, md.SymbolSuffix)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := marketdata.NewBhavcopyProvider(marketdata.BhavcopyOptions{
+		BaseURL: md.BhavcopyBaseURL,
+		Mapper:  mapper,
+		HTTP: marketdata.HTTPOptions{
+			Timeout:     md.HTTPTimeout,
+			MaxAttempts: md.MaxRetries,
+			RetryBase:   md.RetryBase,
+			RateLimit:   md.RateLimit,
+			UserAgent:   md.UserAgent,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provider, nil
+}
+
+// startBhavcopyService launches the official NSE EOD ingestion job when the
+// market data provider is Yahoo. Simulator mode stays fully offline, so
+// bhavcopy is skipped even when MARKET_DATA_BHAVCOPY_ENABLED=true.
+func startBhavcopyService(
+	ctx context.Context,
+	cfg *config.Config,
+	store jobs.PriceStore,
+	calendar *marketcal.Calendar,
+	done chan struct{},
+) {
+	if !cfg.MarketData.BhavcopyEnabled {
+		logrus.Info("Bhavcopy EOD ingestion disabled by MARKET_DATA_BHAVCOPY_ENABLED=false")
+		close(done)
+		return
+	}
+	if cfg.MarketData.Provider != "yahoo" {
+		logrus.WithField("provider", cfg.MarketData.Provider).
+			Warn("Bhavcopy EOD ingestion skipped because MARKET_DATA_PROVIDER is not yahoo; simulator mode stays offline")
+		close(done)
+		return
+	}
+
+	provider, err := newBhavcopyProvider(cfg.MarketData)
+	if err != nil {
+		logrus.Fatalf("bhavcopy provider setup failed: %v", err)
+	}
+
+	service, err := jobs.NewBhavcopyService(store, provider, &jobs.BhavcopyServiceOptions{
+		Calendar:      calendar,
+		FirstAttempt:  cfg.MarketData.BhavcopyTime,
+		RetryUntil:    cfg.MarketData.BhavcopyRetryUntil,
+		RetryInterval: cfg.MarketData.BhavcopyRetryInterval,
+	})
+	if err != nil {
+		logrus.Fatalf("bhavcopy service setup failed: %v", err)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"provider":       provider.Name(),
+		"first_attempt":  cfg.MarketData.BhavcopyTime,
+		"retry_until":    cfg.MarketData.BhavcopyRetryUntil,
+		"retry_interval": cfg.MarketData.BhavcopyRetryInterval.String(),
+	}).Info("Bhavcopy EOD service configured")
+
+	go func() {
+		defer close(done)
+		service.Start(ctx)
+	}()
 }
 
 func runMigrations(dbURL, migrationPath string) error {
