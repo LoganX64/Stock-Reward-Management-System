@@ -44,8 +44,8 @@ func TestCleanMigrationIntegration(t *testing.T) {
 	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version != 25 {
-		t.Errorf("migration version = %d, want 25", version)
+	if version != 27 {
+		t.Errorf("migration version = %d, want 27", version)
 	}
 	if dirty {
 		t.Error("schema_migrations is dirty after a clean migration")
@@ -64,6 +64,13 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"reward_quantity_movements",
 		"reward_current_balances",
 		"reward_ledger_reconciliation",
+		"reward_state",
+		"portfolio_position",
+		"user_cash_position",
+		"instrument_factor",
+		"projection_meta",
+		"projection_refresh_queue",
+		"reward_corporate_action_outcomes_base",
 	} {
 		if !relationExists(t, db, view) {
 			t.Errorf("required relation %s is missing", view)
@@ -81,6 +88,17 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"process_corporate_action_cash",
 		"historical_rewards_as_of",
 		"market_data_source_rank",
+		"reward_corporate_action_outcome_base",
+		"refresh_reward_state",
+		"refresh_user_projections",
+		"refresh_effective_corporate_actions",
+		"refresh_instrument_factors",
+		"refresh_instrument_factors_for_symbols",
+		"backfill_instrument_factors",
+		"affected_reward_ids_for_symbols",
+		"projection_refresh_disabled",
+		"refresh_reward_projection",
+		"refresh_adjustment_projection",
 	} {
 		if !functionExists(t, db, function) {
 			t.Errorf("required function %s is missing", function)
@@ -94,9 +112,25 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"idx_rewards_user_date",
 		"idx_ledger_reward_id",
 		"idx_adjustments_reward_id",
+		"idx_reward_state_user_date",
+		"idx_reward_state_user_active_symbol",
+		"idx_reward_state_terminal_symbol",
+		"idx_reward_state_original_symbol",
 	} {
 		if !indexExists(t, db, index) {
 			t.Errorf("required index %s is missing", index)
+		}
+	}
+
+	for _, trigger := range []string{
+		"trg_reward_projection",
+		"trg_adjustment_projection",
+		"trg_process_corporate_action_cash_insert",
+		"trg_process_corporate_action_cash_update",
+		"trg_process_corporate_action_cash_delete",
+	} {
+		if !triggerExists(t, db, trigger) {
+			t.Errorf("required trigger %s is missing", trigger)
 		}
 	}
 

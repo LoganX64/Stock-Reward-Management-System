@@ -65,15 +65,19 @@ go build -o .\bench\bin\phase0.exe .\bench\phase0
 
 ### What the orchestrator does
 
-1. Builds `stocky-api`, `dbtool`, and `loadgen` into `bench/bin/`.
-2. Creates `stocky_bench` if it does not exist.
+1. Builds `stocky-api`, `dbtool`, `loadgen`, and `rebuild-projections` into
+   `bench/bin/`.
+2. Drops and recreates `stocky_bench` (unless `-skip-seed` is used), so the API
+   applies the full migration set to an empty database.
 3. Starts the API on `http://127.0.0.1:18080` against `stocky_bench`, with
    market-data jobs disabled.
-4. Seeds synthetic data (20,000 users, 500,000 rewards by default).
-5. Captures `EXPLAIN (ANALYZE, BUFFERS)` plans.
-6. Runs the warm-up, steady, and peak load phases.
-7. Captures database settings, connection states, and `pg_stat_statements`.
-8. Stops the API.
+4. Seeds synthetic data (20,000 users, 500,000 rewards by default) with
+   projection triggers suppressed.
+5. Rebuilds the read projections with `rebuild-projections --online`.
+6. Captures `EXPLAIN (ANALYZE, BUFFERS)` plans.
+7. Runs the warm-up, steady, and peak load phases.
+8. Captures database settings, connection states, and `pg_stat_statements`.
+9. Stops the API.
 
 ### Useful options
 
@@ -128,9 +132,11 @@ This is useful when the API is already running or when you want to rerun only
 the load test.
 
 ```powershell
-# Database setup, seed, plans, statistics
-.\bench\bin\dbtool.exe -database stocky_bench setup
+# Database setup, seed, projections, plans, statistics
+.\bench\bin\dbtool.exe -database stocky_bench -recreate setup
 .\bench\bin\dbtool.exe -database stocky_bench -users 20000 seed
+$env:POSTGRES_DB = 'stocky_bench'
+.\bench\bin\rebuild-projections.exe --online
 .\bench\bin\dbtool.exe -database stocky_bench -out bench\results\plans.txt explain
 .\bench\bin\dbtool.exe -database stocky_bench -out bench\results\settings.txt settings
 .\bench\bin\dbtool.exe -database stocky_bench -out bench\results\activity.txt activity
@@ -171,6 +177,10 @@ Defaults are sized for a 12 vCPU / 8 GB local machine:
 | `stock_prices` | 3,001 |
 | `stock_price_history` | 180,000 |
 | `stock_events` | ~315 |
+| `reward_state` | 500,000 |
+| `portfolio_position` | up to 500,000 |
+| `user_cash_position` | 20,000 |
+| `instrument_factor` | ~3,001 |
 
 The seed includes splits, bonuses, mergers (including a successor symbol),
 cash-exit delists, and write-off delists so the corporate-action lifecycle is
@@ -219,5 +229,5 @@ finding.
 
 ## Phase boundary
 
-This harness stops at measurement. Do not add projection tables, rewrite
-handlers, or change view definitions here. Those belong to Phase 1 and later.
+The harness itself only measures. Phase 1 adds the projection schema and
+rebuild step used above; read-path handler changes belong to later phases.

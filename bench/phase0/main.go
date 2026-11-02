@@ -81,6 +81,7 @@ func run(opts options) error {
 	apiExe := filepath.Join(binDir, exeName("stocky-api"))
 	dbtoolExe := filepath.Join(binDir, exeName("dbtool"))
 	loadgenExe := filepath.Join(binDir, exeName("loadgen"))
+	rebuildExe := filepath.Join(binDir, exeName("rebuild-projections"))
 
 	fmt.Printf("result directory: %s\n", resultDir)
 
@@ -93,6 +94,9 @@ func run(opts options) error {
 	if err := build(repoRoot, loadgenExe, "./bench/loadgen"); err != nil {
 		return err
 	}
+	if err := build(repoRoot, rebuildExe, "./cmd/rebuild-projections"); err != nil {
+		return err
+	}
 
 	baseEnv := withEnv(os.Environ(), map[string]string{
 		"POSTGRES_DB": opts.database,
@@ -103,7 +107,13 @@ func run(opts options) error {
 	// -----------------------------------------------------------------------
 
 	fmt.Println("setting up benchmark database...")
-	if err := runCommand(dbtoolExe, dbtoolArgs(opts, "setup"), repoRoot, baseEnv, os.Stdout, os.Stderr); err != nil {
+	setupArgs := dbtoolArgs(opts, "setup")
+	if !opts.skipSeed {
+		// A clean database is required so the API applies every migration before
+		// any data exists. 0027 refuses to switch views over empty projections.
+		setupArgs = dbtoolArgs(opts, "setup", "-recreate")
+	}
+	if err := runCommand(dbtoolExe, setupArgs, repoRoot, baseEnv, os.Stdout, os.Stderr); err != nil {
 		return fmt.Errorf("database setup: %w", err)
 	}
 
@@ -182,6 +192,11 @@ func run(opts options) error {
 		if err := runCommand(dbtoolExe, seedArgs, repoRoot, baseEnv, os.Stdout, os.Stderr); err != nil {
 			return fmt.Errorf("seed: %w", err)
 		}
+	}
+
+	fmt.Println("rebuilding read projections...")
+	if err := runCommand(rebuildExe, []string{"--online"}, repoRoot, baseEnv, os.Stdout, os.Stderr); err != nil {
+		return fmt.Errorf("rebuild projections: %w", err)
 	}
 
 	if err := runCommand(dbtoolExe, dbtoolArgs(opts, "counts", "-out", filepath.Join(resultDir, "row-counts.txt")), repoRoot, baseEnv, os.Stdout, os.Stderr); err != nil {

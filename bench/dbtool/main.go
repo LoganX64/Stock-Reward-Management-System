@@ -44,6 +44,7 @@ func main() {
 	rewardsPerUser := flag.Int("rewards-per-user", 25, "seed rewards per user")
 	symbols := flag.Int("symbols", 3000, "seed instruments")
 	historyDays := flag.Int("history-days", 60, "seed price-history days")
+	recreate := flag.Bool("recreate", false, "drop and recreate the benchmark database during setup")
 	service := flag.String("service", "postgresql-x64-17", "PostgreSQL Windows service name for enable-stats")
 	flag.Parse()
 
@@ -75,7 +76,7 @@ func main() {
 
 	switch command {
 	case "setup":
-		if err := setup(cfg.Database); err != nil {
+		if err := setup(cfg.Database, *recreate); err != nil {
 			fatal("setup: %v", err)
 		}
 	case "seed":
@@ -127,7 +128,7 @@ func main() {
 	}
 }
 
-func setup(dbConfig config.Database) error {
+func setup(dbConfig config.Database, recreate bool) error {
 	admin, err := open(dbConfig, "postgres", 2)
 	if err != nil {
 		return err
@@ -142,8 +143,17 @@ func setup(dbConfig config.Database) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("check database: %w", err)
 	}
+	if recreate && (errors.Is(err, sql.ErrNoRows) || exists == 1) {
+		statement := `DROP DATABASE IF EXISTS ` + pq.QuoteIdentifier(dbConfig.DBName) + ` WITH (FORCE)`
+		if _, err := admin.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("drop database %s: %w", dbConfig.DBName, err)
+		}
+		exists = 0
+		err = sql.ErrNoRows
+		fmt.Printf("dropped database %s\n", dbConfig.DBName)
+	}
 	if errors.Is(err, sql.ErrNoRows) || exists != 1 {
-		statement := fmt.Sprintf(`CREATE DATABASE "%s"`, dbConfig.DBName)
+		statement := `CREATE DATABASE ` + pq.QuoteIdentifier(dbConfig.DBName)
 		if _, err := admin.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("create database %s: %w", dbConfig.DBName, err)
 		}
@@ -639,6 +649,11 @@ func counts(dbConfig config.Database, outPath string) error {
 		UNION ALL SELECT 'stock_price_history', COUNT(*) FROM stock_price_history
 		UNION ALL SELECT 'stock_events', COUNT(*) FROM stock_events
 		UNION ALL SELECT 'ledger', COUNT(*) FROM ledger
+		UNION ALL SELECT 'reward_state', COUNT(*) FROM reward_state
+		UNION ALL SELECT 'portfolio_position', COUNT(*) FROM portfolio_position
+		UNION ALL SELECT 'user_cash_position', COUNT(*) FROM user_cash_position
+		UNION ALL SELECT 'instrument_factor', COUNT(*) FROM instrument_factor
+		UNION ALL SELECT 'projection_refresh_queue', COUNT(*) FROM projection_refresh_queue
 		ORDER BY 1`)
 	if err != nil {
 		return err

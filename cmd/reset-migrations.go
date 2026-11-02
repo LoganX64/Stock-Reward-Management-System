@@ -24,6 +24,17 @@ func main() {
 		DROP FUNCTION IF EXISTS backfill_price_history(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS process_corporate_action_cash(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS sync_corporate_action_cash_trigger() CASCADE;
+		DROP FUNCTION IF EXISTS refresh_reward_projection() CASCADE;
+		DROP FUNCTION IF EXISTS refresh_adjustment_projection() CASCADE;
+		DROP FUNCTION IF EXISTS refresh_effective_corporate_actions(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS refresh_reward_state(INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS refresh_user_projections(INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS refresh_instrument_factors(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS refresh_instrument_factors_for_symbols(TEXT[], DATE) CASCADE;
+		DROP FUNCTION IF EXISTS backfill_instrument_factors(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS projection_refresh_disabled() CASCADE;
+		DROP FUNCTION IF EXISTS affected_reward_ids_for_symbols(TEXT[]) CASCADE;
+		DROP FUNCTION IF EXISTS reward_corporate_action_outcome_base(INTEGER) CASCADE;
 		DROP FUNCTION IF EXISTS reward_corporate_action_cash_details(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS market_data_source_rank(TEXT) CASCADE;
 		DROP FUNCTION IF EXISTS reward_action_settlement(INTEGER, DATE) CASCADE;
@@ -39,6 +50,7 @@ func main() {
 		DROP FUNCTION IF EXISTS instrument_chain(TEXT, DATE, DATE) CASCADE;
 		DROP VIEW IF EXISTS user_corporate_action_cash CASCADE;
 		DROP VIEW IF EXISTS reward_corporate_action_outcomes CASCADE;
+		DROP VIEW IF EXISTS reward_corporate_action_outcomes_base CASCADE;
 		DROP VIEW IF EXISTS instrument_lineage CASCADE;
 		DROP VIEW IF EXISTS historical_rewards CASCADE;
 		DROP VIEW IF EXISTS today_rewards CASCADE;
@@ -58,6 +70,12 @@ func main() {
 	dropTables := `
 		DROP TABLE IF EXISTS 
 			schema_migrations,
+			projection_refresh_queue,
+			projection_meta,
+			instrument_factor,
+			user_cash_position,
+			portfolio_position,
+			reward_state,
 			adjustments,
 			ledger,
 			rewards,

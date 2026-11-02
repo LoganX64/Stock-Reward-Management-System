@@ -21,6 +21,9 @@
 BEGIN;
 
 SET LOCAL synchronous_commit = off;
+-- Projection triggers must not run per row during a 500k-row load. The
+-- orchestrator rebuilds the projections after the base data is committed.
+SET LOCAL stocky.skip_projection_refresh = 'on';
 
 TRUNCATE TABLE
     ledger,
@@ -29,7 +32,12 @@ TRUNCATE TABLE
     stock_events,
     stock_price_history,
     stock_prices,
-    users
+    users,
+    reward_state,
+    portfolio_position,
+    user_cash_position,
+    instrument_factor,
+    projection_refresh_queue
 RESTART IDENTITY CASCADE;
 
 -- ---------------------------------------------------------------------------

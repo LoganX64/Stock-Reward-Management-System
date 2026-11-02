@@ -17,6 +17,10 @@ func TestCorporateActionService_Process(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(market_today())")).
 		WillReturnRows(sqlmock.NewRows([]string{"process_corporate_action_cash"}).AddRow(3))
+	mock.ExpectQuery(regexp.QuoteMeta("refresh_instrument_factors(market_today())")).
+		WillReturnRows(sqlmock.NewRows([]string{"refresh_instrument_factors"}).AddRow(3000))
+	mock.ExpectQuery(regexp.QuoteMeta("refresh_effective_corporate_actions(market_today())")).
+		WillReturnRows(sqlmock.NewRows([]string{"refresh_effective_corporate_actions"}).AddRow(12))
 
 	service := NewCorporateActionService(db)
 	service.process(context.Background())
@@ -35,6 +39,10 @@ func TestCorporateActionService_ProcessErrorDoesNotPanic(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("process_corporate_action_cash(market_today())")).
 		WillReturnError(context.DeadlineExceeded)
+	mock.ExpectQuery(regexp.QuoteMeta("refresh_instrument_factors(market_today())")).
+		WillReturnRows(sqlmock.NewRows([]string{"refresh_instrument_factors"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta("refresh_effective_corporate_actions(market_today())")).
+		WillReturnRows(sqlmock.NewRows([]string{"refresh_effective_corporate_actions"}).AddRow(0))
 
 	service := NewCorporateActionService(db)
 	service.process(context.Background())

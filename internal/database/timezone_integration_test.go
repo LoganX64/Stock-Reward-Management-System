@@ -563,6 +563,38 @@ func TestLegacyTimestampMigrationIntegration(t *testing.T) {
 		t.Fatalf("close pre-migration database connection: %v", err)
 	}
 
+	// 0027 refuses to switch the compatibility views before projections exist.
+	// Stop at 0026, run the equivalent of cmd/rebuild-projections for the
+	// seeded reward, then apply the view switch.
+	applyMigrations(t, dbURL, 26)
+
+	db = openIntegrationDB(t, dbURL)
+	rows, err := db.Query(`SELECT id FROM rewards`)
+	if err != nil {
+		t.Fatalf("list rewards before projection backfill: %v", err)
+	}
+	var rewardIDs []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatalf("scan reward id: %v", err)
+		}
+		rewardIDs = append(rewardIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("iterate rewards before projection backfill: %v", err)
+	}
+	rows.Close()
+	for _, id := range rewardIDs {
+		mustExec(t, db, `SELECT refresh_reward_state($1)`, id)
+	}
+	mustExec(t, db, `SELECT refresh_user_projections($1)`, userID)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close projection backfill connection: %v", err)
+	}
+
 	applyMigrations(t, dbURL, -1)
 
 	db = openIntegrationDB(t, dbURL)
