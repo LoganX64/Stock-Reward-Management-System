@@ -57,12 +57,31 @@ type MarketData struct {
 	Holidays []string
 }
 
+// Projection holds the write-path hardening settings for the maintained
+// read projections: queue worker cadence, retry/alert thresholds, rollover
+// due-check cadence, and reconciliation sampling.
+type Projection struct {
+	RefreshInterval             time.Duration
+	RefreshBatch                int
+	QueueMaxAttempts            int
+	QueueRetention              time.Duration
+	QueueFailedRetention        time.Duration
+	QueueAlertDepth             int
+	QueueAlertLag               time.Duration
+	ReconciliationInterval      time.Duration
+	ReconciliationSamplePercent float64
+	ReconciliationMaxUsers      int
+	SyncUserLimit               int
+	CorporateActionInterval     time.Duration
+}
+
 type Config struct {
 	Env           string
 	Database      Database
 	HTTPServer    HTTPServer
 	MigrationPath string
 	MarketData    MarketData
+	Projection    Projection
 }
 
 // LoadFromEnv loads .env files and environment variables, returning a
@@ -89,6 +108,11 @@ func LoadFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	projection, err := loadProjection(getEnv)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Env: getEnv("ENV", "dev"),
 		Database: Database{
@@ -104,6 +128,7 @@ func LoadFromEnv() (*Config, error) {
 		},
 		MigrationPath: getEnv("MIGRATION_PATH", "./internal/database/migrations"),
 		MarketData:    marketData,
+		Projection:    projection,
 	}
 
 	return cfg, nil
@@ -278,6 +303,101 @@ func loadMarketData(getEnv func(string, string) string) (MarketData, error) {
 	return md, nil
 }
 
+func loadProjection(getEnv func(string, string) string) (Projection, error) {
+	p := Projection{
+		RefreshInterval:             30 * time.Second,
+		RefreshBatch:                200,
+		QueueMaxAttempts:            5,
+		QueueRetention:              168 * time.Hour,
+		QueueFailedRetention:        720 * time.Hour,
+		QueueAlertDepth:             1000,
+		QueueAlertLag:               15 * time.Minute,
+		ReconciliationInterval:      time.Hour,
+		ReconciliationSamplePercent: 0.1,
+		ReconciliationMaxUsers:      500,
+		SyncUserLimit:               50,
+		CorporateActionInterval:     15 * time.Minute,
+	}
+
+	var err error
+
+	if p.RefreshInterval, err = getDurationEnv(getEnv, "PROJECTION_REFRESH_INTERVAL", "30s"); err != nil {
+		return p, err
+	}
+	if p.RefreshBatch, err = getIntEnv(getEnv, "PROJECTION_REFRESH_BATCH", "200"); err != nil {
+		return p, err
+	}
+	if p.QueueMaxAttempts, err = getIntEnv(getEnv, "PROJECTION_QUEUE_MAX_ATTEMPTS", "5"); err != nil {
+		return p, err
+	}
+	if p.QueueRetention, err = getDurationEnv(getEnv, "PROJECTION_QUEUE_RETENTION", "168h"); err != nil {
+		return p, err
+	}
+	if p.QueueFailedRetention, err = getDurationEnv(getEnv, "PROJECTION_QUEUE_FAILED_RETENTION", "720h"); err != nil {
+		return p, err
+	}
+	if p.QueueAlertDepth, err = getIntEnv(getEnv, "PROJECTION_QUEUE_ALERT_DEPTH", "1000"); err != nil {
+		return p, err
+	}
+	if p.QueueAlertLag, err = getDurationEnv(getEnv, "PROJECTION_QUEUE_ALERT_LAG", "15m"); err != nil {
+		return p, err
+	}
+	if p.ReconciliationInterval, err = getDurationEnv(getEnv, "PROJECTION_RECONCILIATION_INTERVAL", "1h"); err != nil {
+		return p, err
+	}
+	if p.ReconciliationSamplePercent, err = getFloatEnv(getEnv, "PROJECTION_RECONCILIATION_SAMPLE_PERCENT", "0.1"); err != nil {
+		return p, err
+	}
+	if p.ReconciliationMaxUsers, err = getIntEnv(getEnv, "PROJECTION_RECONCILIATION_MAX_USERS", "500"); err != nil {
+		return p, err
+	}
+	if p.SyncUserLimit, err = getIntEnv(getEnv, "PROJECTION_SYNC_USER_LIMIT", "50"); err != nil {
+		return p, err
+	}
+	if p.CorporateActionInterval, err = getDurationEnv(getEnv, "CORPORATE_ACTION_INTERVAL", "15m"); err != nil {
+		return p, err
+	}
+
+	if p.RefreshInterval <= 0 {
+		return p, fmt.Errorf("PROJECTION_REFRESH_INTERVAL: must be greater than zero")
+	}
+	if p.RefreshBatch < 1 {
+		return p, fmt.Errorf("PROJECTION_REFRESH_BATCH: must be at least 1")
+	}
+	if p.QueueMaxAttempts < 1 || p.QueueMaxAttempts > 100 {
+		return p, fmt.Errorf("PROJECTION_QUEUE_MAX_ATTEMPTS: must be between 1 and 100")
+	}
+	if p.QueueRetention <= 0 {
+		return p, fmt.Errorf("PROJECTION_QUEUE_RETENTION: must be greater than zero")
+	}
+	if p.QueueFailedRetention <= 0 {
+		return p, fmt.Errorf("PROJECTION_QUEUE_FAILED_RETENTION: must be greater than zero")
+	}
+	if p.QueueAlertDepth < 1 {
+		return p, fmt.Errorf("PROJECTION_QUEUE_ALERT_DEPTH: must be at least 1")
+	}
+	if p.QueueAlertLag <= 0 {
+		return p, fmt.Errorf("PROJECTION_QUEUE_ALERT_LAG: must be greater than zero")
+	}
+	if p.ReconciliationInterval <= 0 {
+		return p, fmt.Errorf("PROJECTION_RECONCILIATION_INTERVAL: must be greater than zero")
+	}
+	if p.ReconciliationSamplePercent <= 0 || p.ReconciliationSamplePercent > 100 {
+		return p, fmt.Errorf("PROJECTION_RECONCILIATION_SAMPLE_PERCENT: must be greater than 0 and at most 100")
+	}
+	if p.ReconciliationMaxUsers < 1 {
+		return p, fmt.Errorf("PROJECTION_RECONCILIATION_MAX_USERS: must be at least 1")
+	}
+	if p.SyncUserLimit < 0 {
+		return p, fmt.Errorf("PROJECTION_SYNC_USER_LIMIT: must not be negative")
+	}
+	if p.CorporateActionInterval <= 0 {
+		return p, fmt.Errorf("CORPORATE_ACTION_INTERVAL: must be greater than zero")
+	}
+
+	return p, nil
+}
+
 func getBoolEnv(getEnv func(string, string) string, key, defaultVal string) (bool, error) {
 	raw := strings.TrimSpace(getEnv(key, defaultVal))
 	value, err := strconv.ParseBool(raw)
@@ -301,6 +421,15 @@ func getIntEnv(getEnv func(string, string) string, key, defaultVal string) (int,
 	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s: invalid integer %q: %w", key, raw, err)
+	}
+	return value, nil
+}
+
+func getFloatEnv(getEnv func(string, string) string, key, defaultVal string) (float64, error) {
+	raw := strings.TrimSpace(getEnv(key, defaultVal))
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid number %q: %w", key, raw, err)
 	}
 	return value, nil
 }

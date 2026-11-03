@@ -1,4 +1,5 @@
-// Command dbtool performs the database-side work for the Phase 0 benchmark.
+// Command dbtool performs the database-side work for the benchmark harness,
+// including the Phase 2 write-overhead measurement and live rebuild check.
 //
 // It uses the same configuration loader as the API, so it never needs the
 // password to be copied into a shell environment or printed. It only reports
@@ -20,6 +21,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/config"
@@ -46,11 +49,18 @@ func main() {
 	historyDays := flag.Int("history-days", 60, "seed price-history days")
 	recreate := flag.Bool("recreate", false, "drop and recreate the benchmark database during setup")
 	service := flag.String("service", "postgresql-x64-17", "PostgreSQL Windows service name for enable-stats")
+	iterations := flag.Int("iterations", 50, "measured iterations for write-overhead")
+	warmup := flag.Int("warmup", 5, "warm-up iterations for write-overhead")
+	rebuildBin := flag.String("rebuild-bin", "", "rebuild-projections binary for rebuild-check (default bench/bin/rebuild-projections[.exe])")
+	rebuildRuns := flag.Int("rebuild-runs", 2, "online rebuild runs for rebuild-check")
+	writers := flag.Int("writers", 4, "concurrent writers during rebuild-check")
+	writeInterval := flag.Duration("write-interval", 500*time.Millisecond, "delay between concurrent writes during rebuild-check")
+	writeLimit := flag.Int("write-limit", 250, "maximum rewards each concurrent writer inserts")
 	flag.Parse()
 
 	command := flag.Arg(0)
 	if command == "" {
-		fmt.Fprintln(os.Stderr, "usage: dbtool <setup|seed|explain|stats|settings|activity|sessions|stop-sessions|enable-stats|disable-stats|reset-stats|counts> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dbtool <setup|seed|explain|stats|settings|activity|sessions|stop-sessions|enable-stats|disable-stats|reset-stats|counts|write-overhead|rebuild-check> [flags]")
 		os.Exit(2)
 	}
 
@@ -122,6 +132,14 @@ func main() {
 	case "counts":
 		if err := counts(cfg.Database, *out); err != nil {
 			fatal("counts: %v", err)
+		}
+	case "write-overhead":
+		if err := writeOverhead(cfg.Database, *iterations, *warmup, *out); err != nil {
+			fatal("write-overhead: %v", err)
+		}
+	case "rebuild-check":
+		if err := rebuildCheck(cfg.Database, *rebuildBin, *rebuildRuns, *writers, *writeInterval, *writeLimit, *out); err != nil {
+			fatal("rebuild-check: %v", err)
 		}
 	default:
 		fatal("unknown command %q", command)
@@ -654,6 +672,7 @@ func counts(dbConfig config.Database, outPath string) error {
 		UNION ALL SELECT 'user_cash_position', COUNT(*) FROM user_cash_position
 		UNION ALL SELECT 'instrument_factor', COUNT(*) FROM instrument_factor
 		UNION ALL SELECT 'projection_refresh_queue', COUNT(*) FROM projection_refresh_queue
+		UNION ALL SELECT 'projection_reconciliation_focus', COUNT(*) FROM projection_reconciliation_focus
 		ORDER BY 1`)
 	if err != nil {
 		return err
@@ -676,7 +695,515 @@ func counts(dbConfig config.Database, outPath string) error {
 	return writeOutput(outPath, builder.String())
 }
 
-func open(dbConfig config.Database, databaseName string, maxConns int) (*sql.DB, error) {
+// writeOverhead compares trigger-enabled and trigger-suppressed reward and
+// adjustment writes. It runs against a disposable user and symbol so the
+// benchmark can be repeated without touching seeded rows.
+func writeOverhead(dbConfig config.Database, iterations, warmup int, outPath string) error {
+	if iterations < 1 {
+		return fmt.Errorf("iterations must be at least 1")
+	}
+	if warmup < 0 {
+		return fmt.Errorf("warmup must not be negative")
+	}
+
+	db, err := open(dbConfig, dbConfig.DBName, 2)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%10000000000)
+	symbol := "WO" + suffix
+	userID, err := createBenchmarkFixture(ctx, db, symbol, "wo_user_"+suffix)
+	if err != nil {
+		return err
+	}
+	defer cleanupBenchmarkFixture(db, userID, symbol)
+
+	// A stable reward for the adjustment measurements.
+	var adjustmentRewardID int
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO rewards (user_id, stock_symbol, original_quantity, quantity, created_at)
+		VALUES ($1, $2, 10, 10, ((market_today() - 4000) + time '09:15')::timestamp)
+		RETURNING id
+	`, userID, symbol).Scan(&adjustmentRewardID); err != nil {
+		return fmt.Errorf("create adjustment fixture reward: %w", err)
+	}
+
+	type result struct {
+		operation string
+		mode      string
+		samples   []time.Duration
+	}
+
+	var results []result
+
+	rewardSequence := 0
+	insertReward := func(tx *sql.Tx) error {
+		day := 5000 - rewardSequence
+		rewardSequence++
+		var id int
+		return tx.QueryRowContext(ctx, `
+			INSERT INTO rewards (user_id, stock_symbol, original_quantity, quantity, created_at)
+			VALUES ($1, $2, 10, 10, ((market_today() - $3::INTEGER) + time '09:15')::timestamp)
+			RETURNING id
+		`, userID, symbol, day).Scan(&id)
+	}
+
+	insertAdjustment := func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO adjustments (
+				reward_id, adjustment_type, delta_quantity, delta_amount, reason, effective_date
+			)
+			VALUES ($1, 'manual_correction', 0, 1, 'write-overhead', market_today())
+		`, adjustmentRewardID)
+		return err
+	}
+
+	for _, mode := range []struct {
+		name string
+		skip bool
+	}{
+		{name: "triggers_on", skip: false},
+		{name: "triggers_off", skip: true},
+	} {
+		samples, err := measureWrites(ctx, db, iterations, warmup, mode.skip, insertReward)
+		if err != nil {
+			return fmt.Errorf("measure reward insert (%s): %w", mode.name, err)
+		}
+		results = append(results, result{
+			operation: "reward_insert",
+			mode:      mode.name,
+			samples:   samples,
+		})
+
+		samples, err = measureWrites(ctx, db, iterations, warmup, mode.skip, insertAdjustment)
+		if err != nil {
+			return fmt.Errorf("measure adjustment insert (%s): %w", mode.name, err)
+		}
+		results = append(results, result{
+			operation: "adjustment_insert",
+			mode:      mode.name,
+			samples:   samples,
+		})
+	}
+
+	var builder strings.Builder
+	builder.WriteString("operation\tmode\tsamples\tmean_ms\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
+	for _, item := range results {
+		mean, p50, p95, p99, max := summarizeLatency(item.samples)
+		fmt.Fprintf(
+			&builder,
+			"%s\t%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
+			item.operation,
+			item.mode,
+			len(item.samples),
+			durationMillis(mean),
+			durationMillis(p50),
+			durationMillis(p95),
+			durationMillis(p99),
+			durationMillis(max),
+		)
+	}
+	return writeOutput(outPath, builder.String())
+}
+
+func measureWrites(
+	ctx context.Context,
+	db *sql.DB,
+	iterations, warmup int,
+	skipTriggers bool,
+	fn func(*sql.Tx) error,
+) ([]time.Duration, error) {
+	samples := make([]time.Duration, 0, iterations)
+	for i := -warmup; i < iterations; i++ {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if skipTriggers {
+			if _, err := tx.ExecContext(ctx, `SET LOCAL stocky.skip_projection_refresh = 'on'`); err != nil {
+				_ = tx.Rollback()
+				return nil, err
+			}
+		}
+
+		started := time.Now()
+		err = fn(tx)
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+		elapsed := time.Since(started)
+		if err != nil {
+			return nil, err
+		}
+		if i >= 0 {
+			samples = append(samples, elapsed)
+		}
+	}
+	return samples, nil
+}
+
+func summarizeLatency(samples []time.Duration) (mean, p50, p95, p99, max time.Duration) {
+	if len(samples) == 0 {
+		return 0, 0, 0, 0, 0
+	}
+
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	var total time.Duration
+	for _, sample := range sorted {
+		total += sample
+	}
+
+	nearest := func(percent int) time.Duration {
+		index := (len(sorted)*percent+99)/100 - 1
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(sorted) {
+			index = len(sorted) - 1
+		}
+		return sorted[index]
+	}
+
+	return total / time.Duration(len(sorted)), nearest(50), nearest(95), nearest(99), sorted[len(sorted)-1]
+}
+
+func durationMillis(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
+}
+
+// rebuildCheck runs cmd/rebuild-projections --online while writers mutate a
+// disposable user. It then verifies that the live writes survived and that the
+// reconciliation baseline reports no drift. A second run records repeat cost
+// and verifies the online path remains safe.
+func rebuildCheck(
+	dbConfig config.Database,
+	binary string,
+	runs, writers int,
+	writeInterval time.Duration,
+	writeLimit int,
+	outPath string,
+) error {
+	if runs < 1 {
+		return fmt.Errorf("rebuild-runs must be at least 1")
+	}
+	if writers < 1 {
+		return fmt.Errorf("writers must be at least 1")
+	}
+	if writeInterval < 0 {
+		return fmt.Errorf("write-interval must not be negative")
+	}
+	if writeLimit < 1 {
+		return fmt.Errorf("write-limit must be at least 1")
+	}
+
+	if binary == "" {
+		binary = filepath.Join("bench", "bin", "rebuild-projections")
+		if runtime.GOOS == "windows" {
+			binary += ".exe"
+		}
+	}
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf(
+			"rebuild binary %s not found; build it with `go build -o %s ./cmd/rebuild-projections`: %w",
+			binary, binary, err,
+		)
+	}
+
+	db, err := open(dbConfig, dbConfig.DBName, 4)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%10000000000)
+	type benchmarkFixture struct {
+		userID int
+		symbol string
+	}
+	fixtures := make([]benchmarkFixture, 0, writers)
+	for i := 0; i < writers; i++ {
+		fixture := benchmarkFixture{
+			symbol: fmt.Sprintf("RC%s%02d", suffix, i),
+		}
+		fixture.userID, err = createBenchmarkFixture(
+			ctx,
+			db,
+			fixture.symbol,
+			fmt.Sprintf("rc_user_%s_%d", suffix, i),
+		)
+		if err != nil {
+			for _, created := range fixtures {
+				cleanupBenchmarkFixture(db, created.userID, created.symbol)
+			}
+			return err
+		}
+		fixtures = append(fixtures, fixture)
+	}
+	defer func() {
+		for _, fixture := range fixtures {
+			cleanupBenchmarkFixture(db, fixture.userID, fixture.symbol)
+		}
+	}()
+
+	userIDs := make([]int, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		userIDs = append(userIDs, fixture.userID)
+	}
+
+	stop := make(chan struct{})
+	writeErrors := make(chan error, writers)
+	var writeCount int64
+	var sequence int64
+	var writerGroup sync.WaitGroup
+
+	for i := range fixtures {
+		fixture := fixtures[i]
+		writerGroup.Add(1)
+		go func() {
+			defer writerGroup.Done()
+			for inserted := 0; inserted < writeLimit; inserted++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+
+				day := 10000 + int(atomic.AddInt64(&sequence, 1))
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					select {
+					case writeErrors <- err:
+					default:
+					}
+					return
+				}
+
+				var rewardID int
+				err = tx.QueryRowContext(ctx, `
+					INSERT INTO rewards (user_id, stock_symbol, original_quantity, quantity, created_at)
+					VALUES ($1, $2, 7, 7, ((market_today() - $3::INTEGER) + time '09:15')::timestamp)
+					RETURNING id
+				`, fixture.userID, fixture.symbol, day).Scan(&rewardID)
+				if err == nil {
+					_, err = tx.ExecContext(ctx, `
+						INSERT INTO adjustments (
+							reward_id, adjustment_type, delta_quantity, delta_amount, reason, effective_date
+						)
+						VALUES ($1, 'manual_correction', 0, 2, 'rebuild-check', market_today())
+					`, rewardID)
+				}
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
+				if err != nil {
+					select {
+					case writeErrors <- err:
+					default:
+					}
+					return
+				}
+
+				atomic.AddInt64(&writeCount, 1)
+				select {
+				case <-stop:
+					return
+				case <-time.After(writeInterval):
+				}
+			}
+		}()
+	}
+
+	type rebuildRun struct {
+		seconds     float64
+		afterWrites int64
+		mismatches  int
+		rewards     int
+		states      int
+	}
+
+	rebuildRuns := make([]rebuildRun, 0, runs)
+	for run := 0; run < runs; run++ {
+		started := time.Now()
+		if err := runOnlineRebuild(ctx, binary, dbConfig); err != nil {
+			close(stop)
+			writerGroup.Wait()
+			return fmt.Errorf("online rebuild run %d: %w", run+1, err)
+		}
+		elapsed := time.Since(started)
+
+		var mismatches, rewards, states int
+		// One statement keeps the reward/reward_state counts in the same
+		// snapshot while the writers are still committing.
+		if err := db.QueryRowContext(ctx, `
+			SELECT
+				(SELECT COUNT(*) FROM rewards WHERE user_id = ANY($1::INTEGER[])),
+				(SELECT COUNT(*) FROM reward_state WHERE user_id = ANY($1::INTEGER[])),
+				(SELECT COUNT(*) FROM projection_mismatches_for_users($1::INTEGER[]))
+		`, pq.Array(userIDs)).Scan(&rewards, &states, &mismatches); err != nil {
+			close(stop)
+			writerGroup.Wait()
+			return fmt.Errorf("verify fixture projections after run %d: %w", run+1, err)
+		}
+
+		rebuildRuns = append(rebuildRuns, rebuildRun{
+			seconds:     elapsed.Seconds(),
+			afterWrites: atomic.LoadInt64(&writeCount),
+			mismatches:  mismatches,
+			rewards:     rewards,
+			states:      states,
+		})
+	}
+
+	close(stop)
+	writerGroup.Wait()
+	close(writeErrors)
+
+	if err := firstError(writeErrors); err != nil {
+		return fmt.Errorf("concurrent writer failed: %w", err)
+	}
+
+	var finalMismatches int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projection_mismatches_for_users($1::INTEGER[])
+	`, pq.Array(userIDs)).Scan(&finalMismatches); err != nil {
+		return fmt.Errorf("verify quiesced fixture projections: %w", err)
+	}
+	if finalMismatches != 0 {
+		return fmt.Errorf("quiesced fixture has %d reconciliation mismatch(es)", finalMismatches)
+	}
+
+	var builder strings.Builder
+	builder.WriteString("run\tseconds\tconcurrent_writes\tfixture_rewards\tfixture_reward_state\tmismatches\n")
+	for index, run := range rebuildRuns {
+		fmt.Fprintf(
+			&builder,
+			"%d\t%.3f\t%d\t%d\t%d\t%d\n",
+			index+1,
+			run.seconds,
+			run.afterWrites,
+			run.rewards,
+			run.states,
+			run.mismatches,
+		)
+		if run.mismatches != 0 {
+			return fmt.Errorf(
+				"online rebuild run %d left %d reconciliation mismatch(es) for the live fixture",
+				index+1, run.mismatches,
+			)
+		}
+		if run.rewards != run.states {
+			return fmt.Errorf(
+				"online rebuild run %d: fixture has %d rewards but %d reward_state rows",
+				index+1, run.rewards, run.states,
+			)
+		}
+	}
+	fmt.Fprintf(&builder, "concurrent_writes\t%d\n", atomic.LoadInt64(&writeCount))
+	fmt.Fprintf(&builder, "quiesced_mismatches\t%d\n", finalMismatches)
+	return writeOutput(outPath, builder.String())
+}
+
+func runOnlineRebuild(ctx context.Context, binary string, dbConfig config.Database) error {
+	cmd := exec.CommandContext(
+		ctx,
+		binary,
+		"--online",
+		"--skip-vacuum",
+		"--database-url",
+		connectionURL(dbConfig, dbConfig.DBName),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func firstError(errors <-chan error) error {
+	for err := range errors {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createBenchmarkFixture(ctx context.Context, db *sql.DB, symbol, username string) (int, error) {
+	var userID int
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO users (username, email) VALUES ($1, $2) RETURNING id
+	`, username, username+"@bench.local").Scan(&userID); err != nil {
+		return 0, fmt.Errorf("create benchmark user: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO stock_prices (stock_symbol, price, source, fetched_at)
+		VALUES ($1, 100.0000, 'simulator', NOW())
+	`, symbol); err != nil {
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+		return 0, fmt.Errorf("create benchmark price: %w", err)
+	}
+
+	return userID, nil
+}
+
+func cleanupBenchmarkFixture(db *sql.DB, userID int, symbol string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	tx, err := db.BeginTx(cleanupCtx, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: clean up benchmark fixture: %v\n", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// A live-trigger cleanup would refresh the user once per deleted reward and
+	// turn a large fixture into quadratic work.
+	if _, err := tx.ExecContext(cleanupCtx, `SET LOCAL stocky.skip_projection_refresh = 'on'`); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: suppress projection refresh during cleanup: %v\n", err)
+		return
+	}
+
+	statements := []struct {
+		label string
+		query string
+		args  []any
+	}{
+		{label: "adjustments", query: `
+			DELETE FROM adjustments
+			WHERE reward_id IN (SELECT id FROM rewards WHERE user_id = $1)
+		`, args: []any{userID}},
+		{label: "rewards", query: `DELETE FROM rewards WHERE user_id = $1`, args: []any{userID}},
+		{label: "user", query: `DELETE FROM users WHERE id = $1`, args: []any{userID}},
+		{label: "price", query: `DELETE FROM stock_prices WHERE stock_symbol = $1`, args: []any{symbol}},
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(cleanupCtx, statement.query, statement.args...); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: clean up benchmark %s: %v\n", statement.label, err)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: commit benchmark cleanup: %v\n", err)
+	}
+}
+
+func connectionURL(dbConfig config.Database, databaseName string) string {
 	connectionURL := &url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(dbConfig.User, dbConfig.Password),
@@ -686,8 +1213,11 @@ func open(dbConfig config.Database, databaseName string, maxConns int) (*sql.DB,
 	query := connectionURL.Query()
 	query.Set("sslmode", dbConfig.SSLMode)
 	connectionURL.RawQuery = query.Encode()
+	return connectionURL.String()
+}
 
-	db, err := sql.Open("postgres", connectionURL.String())
+func open(dbConfig config.Database, databaseName string, maxConns int) (*sql.DB, error) {
+	db, err := sql.Open("postgres", connectionURL(dbConfig, databaseName))
 	if err != nil {
 		return nil, err
 	}

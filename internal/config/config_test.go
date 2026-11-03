@@ -16,6 +16,106 @@ func envValues(values map[string]string) func(string, string) string {
 	}
 }
 
+func TestLoadProjectionDefaults(t *testing.T) {
+	p, err := loadProjection(envValues(nil))
+	if err != nil {
+		t.Fatalf("loadProjection() error = %v", err)
+	}
+
+	if p.RefreshInterval != 30*time.Second {
+		t.Errorf("RefreshInterval = %s, want 30s", p.RefreshInterval)
+	}
+	if p.RefreshBatch != 200 {
+		t.Errorf("RefreshBatch = %d, want 200", p.RefreshBatch)
+	}
+	if p.QueueMaxAttempts != 5 {
+		t.Errorf("QueueMaxAttempts = %d, want 5", p.QueueMaxAttempts)
+	}
+	if p.QueueRetention != 168*time.Hour {
+		t.Errorf("QueueRetention = %s, want 168h", p.QueueRetention)
+	}
+	if p.QueueFailedRetention != 720*time.Hour {
+		t.Errorf("QueueFailedRetention = %s, want 720h", p.QueueFailedRetention)
+	}
+	if p.QueueAlertDepth != 1000 {
+		t.Errorf("QueueAlertDepth = %d, want 1000", p.QueueAlertDepth)
+	}
+	if p.QueueAlertLag != 15*time.Minute {
+		t.Errorf("QueueAlertLag = %s, want 15m", p.QueueAlertLag)
+	}
+	if p.ReconciliationInterval != time.Hour {
+		t.Errorf("ReconciliationInterval = %s, want 1h", p.ReconciliationInterval)
+	}
+	if p.ReconciliationSamplePercent != 0.1 {
+		t.Errorf("ReconciliationSamplePercent = %v, want 0.1", p.ReconciliationSamplePercent)
+	}
+	if p.ReconciliationMaxUsers != 500 {
+		t.Errorf("ReconciliationMaxUsers = %d, want 500", p.ReconciliationMaxUsers)
+	}
+	if p.SyncUserLimit != 50 {
+		t.Errorf("SyncUserLimit = %d, want 50", p.SyncUserLimit)
+	}
+	if p.CorporateActionInterval != 15*time.Minute {
+		t.Errorf("CorporateActionInterval = %s, want 15m", p.CorporateActionInterval)
+	}
+}
+
+func TestLoadProjectionOverrides(t *testing.T) {
+	p, err := loadProjection(envValues(map[string]string{
+		"PROJECTION_REFRESH_INTERVAL":              "45s",
+		"PROJECTION_REFRESH_BATCH":                 "25",
+		"PROJECTION_QUEUE_MAX_ATTEMPTS":            "9",
+		"PROJECTION_QUEUE_RETENTION":               "24h",
+		"PROJECTION_QUEUE_FAILED_RETENTION":        "48h",
+		"PROJECTION_QUEUE_ALERT_DEPTH":             "10",
+		"PROJECTION_QUEUE_ALERT_LAG":               "2m",
+		"PROJECTION_RECONCILIATION_INTERVAL":       "10m",
+		"PROJECTION_RECONCILIATION_SAMPLE_PERCENT": "2.5",
+		"PROJECTION_RECONCILIATION_MAX_USERS":      "40",
+		"PROJECTION_SYNC_USER_LIMIT":               "0",
+		"CORPORATE_ACTION_INTERVAL":                "5m",
+	}))
+	if err != nil {
+		t.Fatalf("loadProjection() error = %v", err)
+	}
+
+	if p.RefreshInterval != 45*time.Second || p.RefreshBatch != 25 {
+		t.Errorf("refresh overrides = %s/%d, want 45s/25", p.RefreshInterval, p.RefreshBatch)
+	}
+	if p.QueueMaxAttempts != 9 || p.QueueAlertDepth != 10 || p.QueueAlertLag != 2*time.Minute {
+		t.Errorf("queue overrides = %d/%d/%s", p.QueueMaxAttempts, p.QueueAlertDepth, p.QueueAlertLag)
+	}
+	if p.ReconciliationSamplePercent != 2.5 || p.ReconciliationMaxUsers != 40 {
+		t.Errorf("reconciliation overrides = %v/%d", p.ReconciliationSamplePercent, p.ReconciliationMaxUsers)
+	}
+	if p.SyncUserLimit != 0 {
+		t.Errorf("SyncUserLimit = %d, want 0", p.SyncUserLimit)
+	}
+}
+
+func TestLoadProjectionRejectsInvalidValues(t *testing.T) {
+	cases := map[string]map[string]string{
+		"refresh interval":    {"PROJECTION_REFRESH_INTERVAL": "0s"},
+		"refresh batch":       {"PROJECTION_REFRESH_BATCH": "0"},
+		"max attempts":        {"PROJECTION_QUEUE_MAX_ATTEMPTS": "0"},
+		"queue retention":     {"PROJECTION_QUEUE_RETENTION": "-1h"},
+		"alert depth":         {"PROJECTION_QUEUE_ALERT_DEPTH": "0"},
+		"sample percent":      {"PROJECTION_RECONCILIATION_SAMPLE_PERCENT": "101"},
+		"max users":           {"PROJECTION_RECONCILIATION_MAX_USERS": "0"},
+		"negative sync limit": {"PROJECTION_SYNC_USER_LIMIT": "-1"},
+		"corporate action":    {"CORPORATE_ACTION_INTERVAL": "0s"},
+		"invalid float":       {"PROJECTION_RECONCILIATION_SAMPLE_PERCENT": "many"},
+	}
+
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadProjection(envValues(values)); err == nil {
+				t.Fatal("loadProjection() error = nil, want validation error")
+			}
+		})
+	}
+}
+
 func TestLoadMarketDataDefaults(t *testing.T) {
 	md, err := loadMarketData(envValues(nil))
 	if err != nil {

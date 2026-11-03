@@ -300,6 +300,84 @@ The second row is the boundary case that binary floating point can round down. S
 - Adjustments take effect on `adjustments.effective_date` (defaults to `market_today()`). Quantity movements are normalized to reward-date units through the merger chain, so a post-split or post-merger correction is not scaled twice.
 - `reward_ledger_reconciliation.stock_quantity_matches` compares movement-derived quantities with stock-unit postings after applying the same chain-aware event factors.
 
+### Maintained read projections
+
+Migrations `0026`–`0028` replace the computational read views with maintained
+projection tables: `reward_state`, `portfolio_position`, `user_cash_position`,
+and `instrument_factor`. The public view names, column order, and column types
+are unchanged. Reward and adjustment triggers refresh the affected reward and
+user in the same transaction; stock-event writes refresh the factor cache and
+`reward_state`, then refresh the affected users or enqueue them for the worker.
+
+`cmd/rebuild-projections` populates or repairs the projections:
+
+```bash
+# Fill missing rows only. Safe while the API is live; never overwrites a
+# trigger-refreshed row.
+go run ./cmd/rebuild-projections --online
+
+# Recompute and repair every row. Quiesce writes first.
+go run ./cmd/rebuild-projections --offline
+```
+
+Both modes record progress in `projection_meta`, hold an advisory lock so only
+one rebuild runs at a time, and write `last_full_rebuild_at` /
+`last_online_backfill_at` on completion. `--online` is a backfill, not a repair:
+if reconciliation reports drift, use `--offline` or refresh the affected users.
+
+### Projection queue and reconciliation
+
+- `projection_refresh_queue` coalesces corporate-action fan-out to one pending
+  row per user. The API worker drains one user per transaction with
+  `FOR UPDATE SKIP LOCKED`, retries with exponential backoff (five attempts by
+  default), and leaves dead letters visible in `projection_queue_stats()`.
+  Processed rows are pruned after 7 days; dead letters after 30 days.
+- The stock-event trigger refreshes up to `PROJECTION_SYNC_USER_LIMIT` affected
+  users synchronously and enqueues larger sets. On its first tick the worker
+  writes the configured limit to `projection_meta.queue_sync_user_limit`.
+  Migration `0028` seeds that value high, so applying the migration without a
+  worker cannot enqueue work with no consumer.
+- `CorporateActionService` ticks every `CORPORATE_ACTION_INTERVAL`, but cash
+  posting, the full factor rebuild, and the effective-event refresh are guarded
+  by per-market-date due checks and advisory locks. The expensive work therefore
+  runs once per market date per database even with multiple API instances.
+- `ReconciliationService` runs hourly and compares a bounded random sample plus
+  every user touched by a corporate action against the authoritative lifecycle
+  baseline. It reports reward, portfolio, and cash drift.
+- Projection alerts are structured error logs with stable `event=projection_*`
+  names and a 15-minute cooldown per condition. Alert on any `"alert":true`
+  error line for queue depth, queue lag, dead letters, stale/invalid factors, or
+  reconciliation drift/error.
+
+Operational checks:
+
+```sql
+-- Queue depth, dead letters, and oldest pending age.
+SELECT * FROM projection_queue_stats();
+
+-- Last reconciliation result and duration.
+SELECT key, value, updated_at
+FROM projection_meta
+WHERE key LIKE 'last_reconciliation%' OR key = 'last_reconciled_at';
+
+-- Factor-cache health: stale rows force the safe fallback.
+SELECT * FROM projection_factor_status();
+```
+
+Benchmark the write path and validate a live rebuild:
+
+```powershell
+go build -o .\bench\bin\dbtool.exe .\bench\dbtool
+go build -o .\bench\bin\rebuild-projections.exe .\cmd\rebuild-projections
+.\bench\bin\dbtool.exe -database stocky_bench -iterations 50 write-overhead
+.\bench\bin\dbtool.exe -database stocky_bench -rebuild-runs 2 -writers 4 rebuild-check
+```
+
+`write-overhead` reports trigger-enabled versus trigger-suppressed reward and
+adjustment latency. `rebuild-check` runs `rebuild-projections --online` while
+writers create rewards and adjustments, then verifies that no projection drifted
+and that the quiesced fixture still reconciles.
+
 ---
 
 ## Running the Project
@@ -420,6 +498,29 @@ MARKET_DATA_PROVIDER=simulator
 MARKET_DATA_BHAVCOPY_ENABLED=false
 ```
 
+### Projection variables
+
+Durations use Go `time.ParseDuration` syntax (`30s`, `15m`, `168h`).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PROJECTION_REFRESH_INTERVAL` | `30s` | Queue-worker tick. |
+| `PROJECTION_REFRESH_BATCH` | `200` | Maximum queue rows drained per tick. |
+| `PROJECTION_QUEUE_MAX_ATTEMPTS` | `5` | Failed attempts before a row becomes a dead letter. |
+| `PROJECTION_QUEUE_RETENTION` | `168h` | Retention for processed queue rows. |
+| `PROJECTION_QUEUE_FAILED_RETENTION` | `720h` | Retention for dead letters. |
+| `PROJECTION_QUEUE_ALERT_DEPTH` | `1000` | Pending-depth alert threshold. |
+| `PROJECTION_QUEUE_ALERT_LAG` | `15m` | Oldest-pending-item alert threshold. |
+| `PROJECTION_RECONCILIATION_INTERVAL` | `1h` | Reconciliation cadence. |
+| `PROJECTION_RECONCILIATION_SAMPLE_PERCENT` | `0.1` | Random active-user sample per run. |
+| `PROJECTION_RECONCILIATION_MAX_USERS` | `500` | Maximum users checked per run. |
+| `PROJECTION_SYNC_USER_LIMIT` | `50` | Affected-user count refreshed inside the stock-event trigger; larger sets are queued. |
+| `CORPORATE_ACTION_INTERVAL` | `15m` | Due-checked corporate-action rollover tick. |
+
+Configuration is validated at startup. Invalid durations, non-positive
+intervals or thresholds, a sample percent outside `(0, 100]`, or a negative
+synchronous fan-out limit fail with an error naming the variable.
+
 ---
 
 ## Testing
@@ -444,6 +545,11 @@ The integration tests are skipped when `TEST_DATABASE_URL` is not set. They cove
 - concurrent keyed rewards, unkeyed same-day rewards, adjustment retries, and overdraft adjustments, asserting that each logical operation commits exactly one effect;
 - reward replay after a later adjustment and ledger reconciliation;
 - split, bonus, reverse-split, merger-chain, delist, and cash-in-lieu valuation semantics;
+- corporate actions on intermediate merger-chain symbols, including event updates and deletions;
+- projection queue threshold behavior, one-user-per-transaction draining, retry/backoff, dead letters, stats, and retention;
+- per-market-date rollover due checks and factor-cache health;
+- reconciliation drift detection across reward, portfolio, and cash projections, plus repair;
+- `0028` up/down/re-apply migration round trips;
 - explicit `missing` price status for current and historical valuations;
 - restrictive deletion and user-deactivation retention behavior.
 
@@ -478,11 +584,12 @@ Market-data and job tests cover:
 
 - `/cmd/stocky-api/main.go` - API entry point.
 - `/cmd/backfill-market-data/main.go` - Official NSE history backfill command.
+- `/cmd/rebuild-projections/main.go` - Online backfill and offline repair of the read projections.
 - `/cmd/reset-migrations.go` - Migration reset utility.
 - `/internal/config/` - Environment configuration.
-- `/internal/database/migrations/` - SQL migrations and views.
+- `/internal/database/migrations/` - SQL migrations and projection views/functions.
 - `/internal/handlers/stocky/` - HTTP handlers, route setup, and tests.
-- `/internal/jobs/` - Quote scheduler, bhavcopy EOD ingestion, history backfill, and corporate-action jobs.
+- `/internal/jobs/` - Quote scheduler, bhavcopy EOD ingestion, history backfill, corporate-action rollover, projection queue worker, reconciliation, and alerting.
 - `/internal/marketcal/` - NSE trading calendar and freshness policy.
 - `/internal/marketdata/` - Provider contracts, Yahoo/bhavcopy/simulator providers, and HTTP client.
 - `/internal/storage/models/` - Data models.

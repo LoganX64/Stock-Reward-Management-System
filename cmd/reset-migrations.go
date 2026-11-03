@@ -17,6 +17,20 @@ func main() {
 
 	// Drop all views and corporate-action functions first
 	dropViews := `
+		DROP FUNCTION IF EXISTS run_projection_reconciliation(NUMERIC, INTEGER, INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS projection_mismatches_for_users(INTEGER[]) CASCADE;
+		DROP FUNCTION IF EXISTS projection_reconciliation_users(NUMERIC, INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS reward_corporate_action_outcomes_base_for_users(INTEGER[]) CASCADE;
+		DROP FUNCTION IF EXISTS projection_factor_status() CASCADE;
+		DROP FUNCTION IF EXISTS refresh_effective_corporate_actions_if_due(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS process_corporate_action_cash_if_due(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS refresh_instrument_factors_if_due(DATE) CASCADE;
+		DROP FUNCTION IF EXISTS prune_projection_refresh_queue(INTERVAL, INTERVAL) CASCADE;
+		DROP FUNCTION IF EXISTS projection_queue_stats() CASCADE;
+		DROP FUNCTION IF EXISTS process_projection_refresh_queue(INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS projection_enqueue_users(INTEGER[], TEXT) CASCADE;
+		DROP FUNCTION IF EXISTS projection_touch_reconciliation_users(INTEGER[], TEXT) CASCADE;
+		DROP FUNCTION IF EXISTS projection_sync_user_limit() CASCADE;
 		DROP FUNCTION IF EXISTS normalize_instrument_symbol_trigger() CASCADE;
 		DROP FUNCTION IF EXISTS normalize_instrument_symbol(TEXT) CASCADE;
 		DROP FUNCTION IF EXISTS historical_rewards_as_of(DATE) CASCADE;
@@ -70,6 +84,7 @@ func main() {
 	dropTables := `
 		DROP TABLE IF EXISTS 
 			schema_migrations,
+			projection_reconciliation_focus,
 			projection_refresh_queue,
 			projection_meta,
 			instrument_factor,

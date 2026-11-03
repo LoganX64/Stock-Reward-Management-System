@@ -342,3 +342,22 @@ lifecycle work from the read path by maintaining projection tables, while
 keeping the base tables authoritative and retaining the existing view names and
 columns for compatibility. That work belongs to Phase 1 and is not part of this
 baseline.
+
+---
+
+## 10. Later runs
+
+This document describes the Phase 0 baseline only. Later runs are archived in
+`bench/results/`:
+
+- **Phase 1 quick profile, 3 Nov 2026:** `bench/results/phase0-20261103-014330/`.
+  It ran with projection-backed views and populated `reward_state` rows, but
+  still missed the SLO. Steady phase: 94.97% success (877 timeouts / 17,444
+  requests), p50 2,352.7 ms, p95 10,000.1 ms. Peak phase: 92.32% success (683
+  timeouts / 8,891 requests), p50 2,576.2 ms, p95 10,000.8 ms. Handler and
+  connection-pool consolidation remain in Phases 3-5.
+- **Phase 2 checks, 3 Nov 2026:**
+  `bench/results/manual-phase2/README.md`. This records the write-overhead
+  benchmark, the live rebuild check, the full test-suite log, and the per-test
+  results. No HTTP load test has been run after Phase 2; the Phase 6 1-hour
+  profiles remain outstanding.

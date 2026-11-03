@@ -120,11 +120,46 @@ func main() {
 	// =======================
 	// Background Corporate Action Job
 	// =======================
-	corporateActionService := jobs.NewCorporateActionService(db)
+	corporateActionService := jobs.NewCorporateActionServiceWithOptions(db, &jobs.CorporateActionServiceOptions{
+		Interval: cfg.Projection.CorporateActionInterval,
+	})
 	corporateActionDone := make(chan struct{})
 	go func() {
 		defer close(corporateActionDone)
 		corporateActionService.Start(ctx)
+	}()
+
+	// =======================
+	// Projection Queue Worker
+	// =======================
+	projectionRefreshService := jobs.NewProjectionRefreshServiceWithOptions(db, &jobs.ProjectionRefreshServiceOptions{
+		Interval:           cfg.Projection.RefreshInterval,
+		BatchSize:          cfg.Projection.RefreshBatch,
+		MaxAttempts:        cfg.Projection.QueueMaxAttempts,
+		ProcessedRetention: cfg.Projection.QueueRetention,
+		FailedRetention:    cfg.Projection.QueueFailedRetention,
+		AlertDepth:         cfg.Projection.QueueAlertDepth,
+		AlertLag:           cfg.Projection.QueueAlertLag,
+		SyncUserLimit:      cfg.Projection.SyncUserLimit,
+	})
+	projectionRefreshDone := make(chan struct{})
+	go func() {
+		defer close(projectionRefreshDone)
+		projectionRefreshService.Start(ctx)
+	}()
+
+	// =======================
+	// Projection Reconciliation Job
+	// =======================
+	reconciliationService := jobs.NewReconciliationServiceWithOptions(db, &jobs.ReconciliationServiceOptions{
+		Interval:      cfg.Projection.ReconciliationInterval,
+		SamplePercent: cfg.Projection.ReconciliationSamplePercent,
+		MaxUsers:      cfg.Projection.ReconciliationMaxUsers,
+	})
+	reconciliationDone := make(chan struct{})
+	go func() {
+		defer close(reconciliationDone)
+		reconciliationService.Start(ctx)
 	}()
 
 	// =======================
@@ -186,6 +221,14 @@ func main() {
 	logrus.Info("Waiting for corporate action processor to stop...")
 	<-corporateActionDone
 	logrus.Info("Corporate action processor stopped")
+
+	logrus.Info("Waiting for projection refresh worker to stop...")
+	<-projectionRefreshDone
+	logrus.Info("Projection refresh worker stopped")
+
+	logrus.Info("Waiting for projection reconciliation service to stop...")
+	<-reconciliationDone
+	logrus.Info("Projection reconciliation service stopped")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

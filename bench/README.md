@@ -1,9 +1,9 @@
-# Phase 0 — Baseline Benchmark
+# Benchmark Harness
 
-This directory contains the Phase 0 measurement harness for the read-path
-projection plan. **Phase 0 changes no application code and adds no schema
-migrations.** It measures the current implementation so later phases can be
-compared against a fixed baseline.
+This directory contains the measurement harness for the read-path projection
+plan. Phase 0 established the baseline against the original computational views;
+Phase 2 adds write-overhead and live-rebuild checks for the maintained
+projections.
 
 See `../read-path-projection-plan.md` for the full plan and
 `../load-test.md` for the Phase 0 load-test setup and baseline findings.
@@ -165,6 +165,79 @@ Then, in another shell, run only the load generator:
   -out bench\results\manual-load
 ```
 
+## Phase 2 write-path checks
+
+`dbtool` provides two checks for the maintained projections.
+
+### Write overhead
+
+`write-overhead` creates a disposable user and symbol, then times reward and
+adjustment inserts with projection triggers enabled and suppressed
+(`stocky.skip_projection_refresh=on`). Each measured operation is one transaction,
+so commit cost is included. The fixture is removed afterwards.
+
+```powershell
+go build -o .\bench\bin\dbtool.exe .\bench\dbtool
+.\bench\bin\dbtool.exe -database stocky_bench -iterations 50 -warmup 5 `
+  -out bench\results\write-overhead.txt write-overhead
+```
+
+Output columns: `operation`, `mode`, `samples`, `mean_ms`, `p50_ms`, `p95_ms`,
+`p99_ms`, `max_ms`.
+
+Measured on 3 Nov 2026 against the default 20,000-user / 500,000-reward seed:
+
+| Operation | Triggers | p50 | p95 |
+|---|---|---:|---:|
+| reward insert | on | 1.816 ms | 3.041 ms |
+| reward insert | off | 0.591 ms | 1.708 ms |
+| adjustment insert | on | 1.910 ms | 2.534 ms |
+| adjustment insert | off | 0.532 ms | 0.669 ms |
+
+The trigger adds roughly 1.2–1.4 ms per write on this dataset while keeping
+writes in the low-single-digit millisecond range. The default synchronous
+fan-out limit of 50 users is well above the one-user cost measured here; a
+larger fan-out is queued rather than charged to the writer.
+
+### Live rebuild check
+
+`rebuild-check` runs `cmd/rebuild-projections --online` while concurrent writers
+create rewards and adjustments for disposable users. After each run it verifies,
+in one statement snapshot, that the fixtures have one `reward_state` row per
+reward and zero reconciliation mismatches. It then stops the writers and
+repeats the check on the quiesced fixture.
+
+```powershell
+go build -o .\bench\bin\rebuild-projections.exe .\cmd\rebuild-projections
+.\bench\bin\dbtool.exe -database stocky_bench -rebuild-runs 2 -writers 4 `
+  -write-interval 500ms -write-limit 250 `
+  -out bench\results\rebuild-check.txt rebuild-check
+```
+
+Output columns: `run`, `seconds`, `concurrent_writes`, `fixture_rewards`,
+`fixture_reward_state`, `mismatches`, followed by `concurrent_writes` and
+`quiesced_mismatches` totals. A non-zero mismatch count fails the command.
+
+Measured on 3 Nov 2026 against the default seed, with four writers capped at 250
+rewards each:
+
+| Run | Seconds | Cumulative concurrent writes | Fixture rewards | Fixture `reward_state` | Mismatches |
+|---|---:|---:|---:|---:|---:|
+| 1 | 146.939 | 1,000 | 1,000 | 1,000 | 0 |
+| 2 | 119.389 | 1,000 | 1,000 | 1,000 | 0 |
+
+`quiesced_mismatches` was `0`, and the disposable users and prices were removed
+after the run. Run 1 overlapped the writers for most of its duration; run 2
+measured the repeat online pass after the writers had reached their cap.
+`--online` did not overwrite or remove any trigger-maintained rows.
+
+The command assumes the standard seed is already loaded and the rebuild binary
+exists. It does not reseed or migrate the database.
+
+Raw output and test logs for these checks are recorded in
+[`results/manual-phase2/README.md`](results/manual-phase2/README.md). That record
+also lists the Phase 2 integration tests and the status of the HTTP load test.
+
 ## Dataset
 
 Defaults are sized for a 12 vCPU / 8 GB local machine:
@@ -181,6 +254,8 @@ Defaults are sized for a 12 vCPU / 8 GB local machine:
 | `portfolio_position` | up to 500,000 |
 | `user_cash_position` | 20,000 |
 | `instrument_factor` | ~3,001 |
+| `projection_refresh_queue` | 0 after a completed rebuild |
+| `projection_reconciliation_focus` | 0 after seed |
 
 The seed includes splits, bonuses, mergers (including a successor symbol),
 cash-exit delists, and write-off delists so the corporate-action lifecycle is
@@ -229,5 +304,6 @@ finding.
 
 ## Phase boundary
 
-The harness itself only measures. Phase 1 adds the projection schema and
-rebuild step used above; read-path handler changes belong to later phases.
+The harness only measures. Phase 1 added the projection schema and rebuild step
+used above. Phase 2 adds the queue, rollover due checks, reconciliation, and the
+two write-path checks. Read-path handler changes belong to Phase 3.

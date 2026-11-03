@@ -37,7 +37,8 @@ TRUNCATE TABLE
     portfolio_position,
     user_cash_position,
     instrument_factor,
-    projection_refresh_queue
+    projection_refresh_queue,
+    projection_reconciliation_focus
 RESTART IDENTITY CASCADE;
 
 -- ---------------------------------------------------------------------------

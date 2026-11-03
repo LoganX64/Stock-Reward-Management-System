@@ -44,8 +44,8 @@ func TestCleanMigrationIntegration(t *testing.T) {
 	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version != 27 {
-		t.Errorf("migration version = %d, want 27", version)
+	if version != 28 {
+		t.Errorf("migration version = %d, want 28", version)
 	}
 	if dirty {
 		t.Error("schema_migrations is dirty after a clean migration")
@@ -71,6 +71,7 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"projection_meta",
 		"projection_refresh_queue",
 		"reward_corporate_action_outcomes_base",
+		"projection_reconciliation_focus",
 	} {
 		if !relationExists(t, db, view) {
 			t.Errorf("required relation %s is missing", view)
@@ -99,6 +100,20 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"projection_refresh_disabled",
 		"refresh_reward_projection",
 		"refresh_adjustment_projection",
+		"projection_sync_user_limit",
+		"projection_touch_reconciliation_users",
+		"projection_enqueue_users",
+		"process_projection_refresh_queue",
+		"projection_queue_stats",
+		"prune_projection_refresh_queue",
+		"refresh_instrument_factors_if_due",
+		"process_corporate_action_cash_if_due",
+		"refresh_effective_corporate_actions_if_due",
+		"reward_corporate_action_outcomes_base_for_users",
+		"projection_mismatches_for_users",
+		"projection_reconciliation_users",
+		"run_projection_reconciliation",
+		"projection_factor_status",
 	} {
 		if !functionExists(t, db, function) {
 			t.Errorf("required function %s is missing", function)
@@ -116,6 +131,10 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"idx_reward_state_user_active_symbol",
 		"idx_reward_state_terminal_symbol",
 		"idx_reward_state_original_symbol",
+		"uq_projection_refresh_queue_pending_user",
+		"idx_projection_refresh_queue_ready",
+		"idx_projection_refresh_queue_processed",
+		"idx_projection_reconciliation_focus_touched",
 	} {
 		if !indexExists(t, db, index) {
 			t.Errorf("required index %s is missing", index)

@@ -13,6 +13,9 @@ import (
 // posted immediately by a database trigger; this service catches events that
 // become effective later (for example a cash-in-lieu split dated in the future)
 // and refreshes date-sensitive projection state at every market-date rollover.
+//
+// Phase 2 runs the service frequently but the SQL wrappers perform the
+// expensive work at most once per market date.
 type CorporateActionService struct {
 	db       DB
 	interval time.Duration
@@ -20,14 +23,37 @@ type CorporateActionService struct {
 	started  int32
 }
 
-// NewCorporateActionService creates a service that runs hourly. Running hourly
-// rather than every 24 hours means a process started after midnight still
-// refreshes instrument_factor and effective corporate actions on the same day.
+// CorporateActionServiceOptions overrides the rollover cadence and timeout.
+type CorporateActionServiceOptions struct {
+	Interval time.Duration
+	Timeout  time.Duration
+}
+
+// NewCorporateActionService creates a service that runs every 15 minutes. The
+// rollover wrappers are due-checked, so the frequent tick is cheap and a
+// process started after midnight still catches the new market date.
 func NewCorporateActionService(db DB) *CorporateActionService {
+	return NewCorporateActionServiceWithOptions(db, nil)
+}
+
+func NewCorporateActionServiceWithOptions(db DB, opts *CorporateActionServiceOptions) *CorporateActionService {
+	options := CorporateActionServiceOptions{
+		Interval: 15 * time.Minute,
+		Timeout:  2 * time.Minute,
+	}
+	if opts != nil {
+		if opts.Interval > 0 {
+			options.Interval = opts.Interval
+		}
+		if opts.Timeout > 0 {
+			options.Timeout = opts.Timeout
+		}
+	}
+
 	return &CorporateActionService{
 		db:       db,
-		interval: time.Hour,
-		timeout:  2 * time.Minute,
+		interval: options.Interval,
+		timeout:  options.Timeout,
 	}
 }
 
@@ -61,15 +87,17 @@ func (s *CorporateActionService) process(ctx context.Context) {
 	defer cancel()
 
 	// The order matters: factors must be current before date-sensitive reward
-	// state is refreshed, and the cash ledger is part of the base state.
+	// state is refreshed, and the cash ledger is part of the base state. The
+	// *_if_due wrappers do the expensive work at most once per market date and
+	// serialise multiple API instances with advisory locks.
 	s.runCount(ctx, "corporate action cash", "postings", `
-		SELECT process_corporate_action_cash(market_today())
+		SELECT process_corporate_action_cash_if_due(market_today())
 	`)
 	s.runCount(ctx, "instrument factors", "symbols", `
-		SELECT refresh_instrument_factors(market_today())
+		SELECT refresh_instrument_factors_if_due(market_today())
 	`)
 	s.runCount(ctx, "effective corporate actions", "rewards", `
-		SELECT refresh_effective_corporate_actions(market_today())
+		SELECT refresh_effective_corporate_actions_if_due(market_today())
 	`)
 }
 
