@@ -151,6 +151,12 @@ Historical rewards use the same explicit-gap rule. In grant-date mode, when `sto
 
 `/stats` returns `todayRewards`, the stock-only `totalPortfolioValue`, the full-set `totalPositions`, `valuationDate`, the same `stalePositions`, `staleSymbols`, and `pricesFresh` fields as `/portfolio`, and the same `cashProceeds`, `cashInLieuProceeds`, and `writtenOffQuantity` totals as `/portfolio`. Its reads run in the same read-only snapshot, so `/stats` and `/portfolio` agree on the active symbol set, total value, position count, valuation date, and staleness summary. `totalPortfolioValue` sums only holdings with an available current price; check `valuationComplete`, `unpricedPositions`, and `unpricedSymbols` before treating it as a complete portfolio value, and check `pricesFresh`/`staleSymbols` before treating it as current.
 
+### Conditional reads, caching, and rate limits
+
+`GET /portfolio` and `GET /stats` return an `ETag` computed from the exact JSON response body and `Cache-Control: private, max-age=0, must-revalidate`. Send the value back in `If-None-Match` to receive `304 Not Modified` with an empty body. The `ETag` changes whenever the response body changes. A per-process LRU cache (enabled by default for 5 seconds) can answer a repeated conditional read without touching PostgreSQL; it is invalidated for a user after that user's reward or adjustment write on the same instance. Writes on another API instance are covered by the short TTL, not by a shared invalidation bus.
+
+All read endpoints are rate-limited per `userId` by default: 20 requests/second with a burst of 40. Rejected reads return `429 Too Many Requests`, `Retry-After`, and `X-RateLimit-Limit`/`X-RateLimit-Remaining` headers. The limiter and cache are per API process. Running N replicas multiplies the effective per-user rate limit by N and gives each replica its own cache; use a shared gateway limiter if a strict global limit is required.
+
 ---
 
 ## Database Schema
@@ -436,6 +442,23 @@ For detached mode:
 docker-compose up --build -d
 ```
 
+For a multi-instance deployment with three API replicas, one worker, a one-shot
+migration job, and nginx, use the scale compose file instead:
+
+```bash
+docker compose -f docker-compose.scale.yml up --build -d
+docker compose -f docker-compose.scale.yml ps
+
+# Change the API replica count without editing the file.
+docker compose -f docker-compose.scale.yml up -d --scale api=4
+```
+
+The scale file publishes nginx on `http://localhost:8080` and PostgreSQL on
+`localhost:5433`. It deliberately has no fixed `container_name` for the API
+service, because a fixed name prevents scaling. The `migrate` service runs once
+and exits; `api` and `worker` start only after it succeeds. Only the worker runs
+price, bhavcopy, corporate-action, projection, and reconciliation jobs.
+
 ---
 
 ## Environment Variables
@@ -501,6 +524,15 @@ Durations use Go `time.ParseDuration` syntax (`3s`, `30m`, `5m`). The API and ba
 | `DB_READ_MAX_IDLE_CONNS` | `10` | Read-replica pool idle connections. |
 | `HTTP_REQUEST_TIMEOUT` | `10s` | Deadline applied to every HTTP request context. |
 | `METRICS_ENABLED` | `true` | Expose Prometheus metrics at `/metrics`. |
+| `APP_ROLE` | `all` | `all`, `api`, `worker`, or `migrate`. API replicas should use `api`; the single background-job process uses `worker`. |
+| `RUN_MIGRATIONS_ON_START` | `true` | Run schema migrations during startup. Set `false` on API/worker replicas and use a one-shot `migrate` job. |
+| `HTTP_ETAG_ENABLED` | `true` | Add `ETag`/`If-None-Match` handling to `/portfolio` and `/stats`. |
+| `HTTP_RESPONSE_CACHE_TTL` | `5s` | Per-process TTL for cached read responses. `0` keeps ETag support but disables storage. |
+| `HTTP_RESPONSE_CACHE_MAX_ENTRIES` | `10000` | Maximum cached responses per process. `0` disables storage. |
+| `HTTP_RATE_LIMIT_ENABLED` | `true` | Enable per-user read rate limiting. |
+| `HTTP_RATE_LIMIT_RPS` | `20` | Sustained read requests/second per user, per API process. |
+| `HTTP_RATE_LIMIT_BURST` | `40` | Token-bucket burst per user, per API process. |
+| `HTTP_RATE_LIMIT_MAX_KEYS` | `100000` | Maximum live user/IP buckets per process. |
 
 Invalid pool sizes, a non-positive timeout, or an idle count larger than the pool maximum fail at startup with an error naming the variable.
 
@@ -513,6 +545,7 @@ Every request receives a context deadline. Read handlers use `QueryContext`, so 
 `GET /metrics` exposes Prometheus text format from the API process. The endpoint is served by the Prometheus Go client; no Prometheus server or container is required. The main series are:
 
 - `stocky_http_requests_total`, `stocky_http_request_duration_seconds`, `stocky_http_in_flight_requests`
+- `stocky_http_cache_events_total`, `stocky_http_cache_entries`, `stocky_http_rate_limited_total`
 - `stocky_db_pool_*` for the `api`, `jobs`, and optional `read` pools
 - `stocky_db_query_duration_seconds` and `stocky_db_query_errors_total` by named query
 - `stocky_projection_queue_*`, `stocky_projection_factor_*`, and `stocky_projection_reconciliation_*`
@@ -525,6 +558,10 @@ The queue, factor, reconciliation, and job gauges are refreshed by the backgroun
 `DB_READ_DSN` is opt-in. Reporting reads (`/portfolio`, `/stats`, `/today-stocks`, and `/historical-inr`) use the read pool when it is configured; writes always use the primary. The read pool inherits `DB_STATEMENT_TIMEOUT`, `DB_IDLE_IN_TRANSACTION_TIMEOUT`, and the connection lifetimes; its DSN may be a URL or a keyword string. Because a replica can lag, a user who has just written data may briefly see stale read results. Leave `DB_READ_DSN` empty when read-your-writes is required.
 
 PgBouncer is not started by this repository. It is an external prerequisite when running multiple API instances: point `DB_HOST`/`DB_PORT` at PgBouncer in transaction mode and keep the total of all instance pools (plus jobs pools) below PostgreSQL `max_connections`. Do not multiply a large per-instance pool across instances without a pooler.
+
+Multiple API instances are stateless when `APP_ROLE=api` and `RUN_MIGRATIONS_ON_START=false`. They share PostgreSQL but not the ETag/LRU cache or rate-limiter buckets. Keep `HTTP_RESPONSE_CACHE_TTL` short (the default is 5 seconds) so a write handled by another instance becomes visible within a bounded interval. Per-user rate limits are enforced per process; divide `HTTP_RATE_LIMIT_RPS` by the replica count if you need the same aggregate ceiling. Run exactly one `APP_ROLE=worker` process (or `APP_ROLE=all` if the API and jobs share one process) so background jobs are not duplicated.
+
+The repository includes `docker-compose.scale.yml` and `deploy/nginx.conf` as a concrete nginx deployment example. For local multi-process testing, `bench/lb` is a dependency-free Go load balancer that can route round-robin or hash each user to one instance. See `bench/README.md` for the commands.
 
 ### Market-data variables
 
@@ -662,8 +699,11 @@ Market-data and job tests cover:
 - `/internal/storage/models/` - Data models.
 - `/internal/utils/` - Rounding and JSON helpers.
 - `/internal/utils/response/` - JSON response helpers.
+- `/bench/lb/` - Local round-robin/user-hash load balancer for multi-instance testing.
+- `/deploy/nginx.conf` - nginx configuration used by `docker-compose.scale.yml`.
 - `Dockerfile` - Docker image instructions.
 - `docker-compose.yml` - Docker Compose setup.
+- `docker-compose.scale.yml` - Multi-instance API/worker/migration/nginx topology.
 - `Stocky-api.postman_collection.json` - Postman collection.
 
 ---

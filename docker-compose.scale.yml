@@ -1,0 +1,129 @@
+# Multi-instance deployment for Phase 5.
+#
+# This file is an alternative to the root docker-compose.yml. It runs:
+#   db       one PostgreSQL instance
+#   migrate  one short-lived migration job
+#   worker   one process that owns all background jobs
+#   api      N stateless API processes behind nginx
+#   lb       nginx, published on http://localhost:8080
+#
+# Start it with:
+#   docker compose -f docker-compose.scale.yml up --build -d
+#   docker compose -f docker-compose.scale.yml ps
+#
+# Change the API replica count without editing the file:
+#   docker compose -f docker-compose.scale.yml up -d --scale api=4
+#
+# Do not add container_name to the api service; fixed names prevent scaling.
+# Migrations run exactly once in the migrate service. The api and worker
+# services must keep RUN_MIGRATIONS_ON_START=false.
+
+x-stocky-image: &stocky-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    volumes:
+      - stocky-scale-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stocky_user -d stocky"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    <<: *stocky-image
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    environment:
+      ENV_FILE: .env.docker
+      APP_ROLE: migrate
+      RUN_MIGRATIONS_ON_START: "true"
+      MARKET_DATA_ENABLED: "false"
+    command: ["./stocky-api"]
+
+  worker:
+    <<: *stocky-image
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env.docker
+    environment:
+      ENV_FILE: .env.docker
+      APP_ROLE: worker
+      RUN_MIGRATIONS_ON_START: "false"
+      MARKET_DATA_ENABLED: "true"
+      MARKET_DATA_BHAVCOPY_ENABLED: "true"
+    command: ["./stocky-api"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  api:
+    <<: *stocky-image
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env.docker
+    environment:
+      ENV_FILE: .env.docker
+      APP_ROLE: api
+      RUN_MIGRATIONS_ON_START: "false"
+      # Only the worker owns price, bhavcopy, and reconciliation jobs.
+      MARKET_DATA_ENABLED: "false"
+      MARKET_DATA_BHAVCOPY_ENABLED: "false"
+    command: ["./stocky-api"]
+    expose:
+      - "8080"
+    deploy:
+      replicas: 3
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  lb:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  stocky-scale-db-data:
+    driver: local

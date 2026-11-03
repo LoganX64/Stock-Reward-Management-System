@@ -169,6 +169,101 @@ Then, in another shell, run only the load generator:
   -out bench\results\manual-load
 ```
 
+## Phase 5 multi-instance checks
+
+Phase 5 adds `ETag`/`304 Not Modified`, a short-lived per-process response
+cache, and per-user read rate limiting. The cache and limiter are deliberately
+local to each API process; PostgreSQL is the only shared state.
+
+Build the API and the local load balancer:
+
+```powershell
+go build -o .\bench\bin\stocky-api.exe .\cmd\stocky-api
+go build -o .\bench\bin\lb.exe .\bench\lb
+```
+
+Apply migrations exactly once, using the migration-only role:
+
+```powershell
+$env:POSTGRES_DB = 'stocky_bench'
+$env:APP_ROLE = 'migrate'
+$env:RUN_MIGRATIONS_ON_START = 'true'
+.\bench\bin\stocky-api.exe
+```
+
+Start three API instances in separate shells. Each shell needs its own
+`HTTP_PORT`; `APP_ROLE=api` prevents background jobs and disables startup
+migrations:
+
+```powershell
+$env:POSTGRES_DB = 'stocky_bench'
+$env:APP_ROLE = 'api'
+$env:RUN_MIGRATIONS_ON_START = 'false'
+$env:MARKET_DATA_ENABLED = 'false'
+$env:MARKET_DATA_BHAVCOPY_ENABLED = 'false'
+$env:HTTP_PORT = '18080'   # use 18082 and 18083 in the other shells
+.\bench\bin\stocky-api.exe
+```
+
+Start the load balancer:
+
+```powershell
+.\bench\bin\lb.exe `
+  -listen 127.0.0.1:18081 `
+  -backends http://127.0.0.1:18080,http://127.0.0.1:18082,http://127.0.0.1:18083 `
+  -strategy round-robin
+```
+
+Then run the normal load generator against `http://127.0.0.1:18081`. Use round
+robin to prove horizontal scaling. Use `-strategy user` to keep each `userId` on
+one instance and exercise that instance's ETag cache:
+
+```powershell
+.\bench\bin\loadgen.exe `
+  -base-url http://127.0.0.1:18081 `
+  -users 20000 `
+  -quick `
+  -out bench\results\manual-phase5
+```
+
+The load generator does not send `If-None-Match`, so its latency numbers still
+pay for the handler and database work (plus ETag computation and cache store).
+Measure 304 savings separately:
+
+```powershell
+$r = Invoke-WebRequest http://127.0.0.1:18081/api/v1/portfolio/1
+$etag = $r.Headers.ETag
+curl.exe -s -o NUL -w "%{http_code}`n" -H "If-None-Match: $etag" `
+  http://127.0.0.1:18081/api/v1/portfolio/1
+```
+
+The first response is `200`; the conditional response is `304` with an empty
+body. Repeat the same user immediately to hit the local cache. A write on one
+instance invalidates that user's cache on that instance only; the 5-second TTL
+bounds staleness on the other instances.
+
+To check the rate limiter, restart one instance with a small limit:
+
+```powershell
+$env:HTTP_RATE_LIMIT_RPS = '1'
+$env:HTTP_RATE_LIMIT_BURST = '2'
+```
+
+Then request the same user three times in a row. The first two return `200`; the
+third returns `429` with `Retry-After` and `X-RateLimit-*` headers. Requests for
+another user still return `200`. Per-instance limits mean three replicas with
+the default `20 rps` allow roughly 60 rps for one user in aggregate.
+
+Per-instance cache and limiter counters are exposed on each API process:
+
+```powershell
+curl.exe -s http://127.0.0.1:18080/metrics | Select-String "stocky_http_cache|stocky_http_rate_limited"
+```
+
+`stocky_http_cache_events_total{event="hit"|"miss"|"revalidated"|"evicted"}`
+shows how often a conditional request was answered without the handler. Raw
+`200` load-generator traffic records misses and evictions, not hits.
+
 ## Phase 2 write-path checks
 
 `dbtool` provides two checks for the maintained projections.
@@ -399,4 +494,6 @@ used above. Phase 2 added the queue, rollover due checks, reconciliation, and th
 two write-path checks. Phase 3 replaced the read-path SQL and the query set used
 for plan capture; the handler and integration tests live outside this directory.
 Phase 4 added the API/jobs pool split, request deadlines, optional read-replica
-routing, and the `api-metrics.txt` capture.
+routing, and the `api-metrics.txt` capture. Phase 5 adds ETag/304 handling, the
+optional per-process LRU cache, per-user rate limiting, and the `lb` harness for
+multi-instance runs.

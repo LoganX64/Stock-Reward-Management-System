@@ -308,6 +308,7 @@ func (h *Handler) CreateReward(c *gin.Context) {
 		return
 	}
 	committed = true
+	h.invalidateReadCache(req.UserID)
 
 	response.WriteJson(c.Writer, http.StatusOK, responseBody)
 }

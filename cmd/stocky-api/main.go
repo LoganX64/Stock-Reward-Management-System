@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,22 +32,41 @@ func main() {
 	cfg := config.MustLoad()
 	logMarketDataConfig(cfg)
 
+	runAPI := cfg.Role == "api" || cfg.Role == "all"
+	runJobs := cfg.Role == "worker" || cfg.Role == "all"
+
+	logrus.WithFields(logrus.Fields{
+		"role":           cfg.Role,
+		"run_api":        runAPI,
+		"run_jobs":       runJobs,
+		"run_migrations": cfg.RunMigrations,
+	}).Info("Application role configured")
+
 	// =======================
 	// Migrations
 	// =======================
-	dbURL := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		cfg.Database.User,
-		cfg.Database.Password,
-		cfg.Database.Host,
-		cfg.Database.DbPort,
-		cfg.Database.DBName,
-		cfg.Database.SSLMode,
-	)
-	if err := runMigrations(dbURL, cfg.MigrationPath); err != nil {
-		logrus.Fatalf("migrations failed: %v", err)
+	shouldMigrate := cfg.RunMigrations || cfg.Role == "migrate"
+	if shouldMigrate {
+		dbURL := fmt.Sprintf(
+			"postgres://%s:%s@%s:%s/%s?sslmode=%s",
+			cfg.Database.User,
+			cfg.Database.Password,
+			cfg.Database.Host,
+			cfg.Database.DbPort,
+			cfg.Database.DBName,
+			cfg.Database.SSLMode,
+		)
+		if err := runMigrations(dbURL, cfg.MigrationPath); err != nil {
+			logrus.Fatalf("migrations failed: %v", err)
+		}
+		logrus.Info("Migrations applied successfully")
+	} else {
+		logrus.Info("Startup migrations disabled; assuming the schema is current")
 	}
-	logrus.Info("Migrations applied successfully")
+	if cfg.Role == "migrate" {
+		logrus.Info("Migration-only role completed")
+		return
+	}
 
 	// =======================
 	// DB Pools
@@ -54,68 +74,78 @@ func main() {
 
 	// The API pool uses a short statement timeout so a slow report cannot
 	// occupy a connection indefinitely. Background jobs get their own pool with
-	// a longer timeout for rollover and reconciliation work.
-	apiDB, err := database.Open(database.ConnectOptions{
-		Host:                     cfg.Database.Host,
-		Port:                     cfg.Database.DbPort,
-		User:                     cfg.Database.User,
-		Password:                 cfg.Database.Password,
-		DBName:                   cfg.Database.DBName,
-		SSLMode:                  cfg.Database.SSLMode,
-		MaxOpenConns:             cfg.Database.MaxOpenConns,
-		MaxIdleConns:             cfg.Database.MaxIdleConns,
-		ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
-		ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
-		StatementTimeout:         cfg.Database.StatementTimeout,
-		IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
-		ApplicationName:          "stocky-api",
-	})
-	if err != nil {
-		logrus.Fatalf("database setup failed: %v", err)
-	}
-	defer func() {
-		if err := apiDB.Close(); err != nil {
-			logrus.WithError(err).Error("Failed to close API DB cleanly")
+	// a longer timeout for rollover and reconciliation work. A worker-only
+	// process does not open the API pool, and an API-only process does not open
+	// the jobs pool.
+	var apiDB *sql.DB
+	if runAPI {
+		var err error
+		apiDB, err = database.Open(database.ConnectOptions{
+			Host:                     cfg.Database.Host,
+			Port:                     cfg.Database.DbPort,
+			User:                     cfg.Database.User,
+			Password:                 cfg.Database.Password,
+			DBName:                   cfg.Database.DBName,
+			SSLMode:                  cfg.Database.SSLMode,
+			MaxOpenConns:             cfg.Database.MaxOpenConns,
+			MaxIdleConns:             cfg.Database.MaxIdleConns,
+			ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
+			ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
+			StatementTimeout:         cfg.Database.StatementTimeout,
+			IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
+			ApplicationName:          "stocky-api",
+		})
+		if err != nil {
+			logrus.Fatalf("database setup failed: %v", err)
 		}
-	}()
-	logrus.WithFields(logrus.Fields{
-		"max_open":            cfg.Database.MaxOpenConns,
-		"max_idle":            cfg.Database.MaxIdleConns,
-		"statement_timeout":   cfg.Database.StatementTimeout.String(),
-		"idle_in_transaction": cfg.Database.IdleInTransactionTimeout.String(),
-	}).Info("API database pool ready")
+		defer func() {
+			if err := apiDB.Close(); err != nil {
+				logrus.WithError(err).Error("Failed to close API DB cleanly")
+			}
+		}()
+		logrus.WithFields(logrus.Fields{
+			"max_open":            cfg.Database.MaxOpenConns,
+			"max_idle":            cfg.Database.MaxIdleConns,
+			"statement_timeout":   cfg.Database.StatementTimeout.String(),
+			"idle_in_transaction": cfg.Database.IdleInTransactionTimeout.String(),
+		}).Info("API database pool ready")
+	}
 
-	jobsDB, err := database.Open(database.ConnectOptions{
-		Host:                     cfg.Database.Host,
-		Port:                     cfg.Database.DbPort,
-		User:                     cfg.Database.User,
-		Password:                 cfg.Database.Password,
-		DBName:                   cfg.Database.DBName,
-		SSLMode:                  cfg.Database.SSLMode,
-		MaxOpenConns:             cfg.Database.JobMaxOpenConns,
-		MaxIdleConns:             cfg.Database.JobMaxIdleConns,
-		ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
-		ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
-		StatementTimeout:         cfg.Database.JobStatementTimeout,
-		IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
-		ApplicationName:          "stocky-jobs",
-	})
-	if err != nil {
-		logrus.Fatalf("jobs database setup failed: %v", err)
-	}
-	defer func() {
-		if err := jobsDB.Close(); err != nil {
-			logrus.WithError(err).Error("Failed to close jobs DB cleanly")
+	var jobsDB *sql.DB
+	if runJobs {
+		var err error
+		jobsDB, err = database.Open(database.ConnectOptions{
+			Host:                     cfg.Database.Host,
+			Port:                     cfg.Database.DbPort,
+			User:                     cfg.Database.User,
+			Password:                 cfg.Database.Password,
+			DBName:                   cfg.Database.DBName,
+			SSLMode:                  cfg.Database.SSLMode,
+			MaxOpenConns:             cfg.Database.JobMaxOpenConns,
+			MaxIdleConns:             cfg.Database.JobMaxIdleConns,
+			ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
+			ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
+			StatementTimeout:         cfg.Database.JobStatementTimeout,
+			IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
+			ApplicationName:          "stocky-jobs",
+		})
+		if err != nil {
+			logrus.Fatalf("jobs database setup failed: %v", err)
 		}
-	}()
-	logrus.WithFields(logrus.Fields{
-		"max_open":          cfg.Database.JobMaxOpenConns,
-		"max_idle":          cfg.Database.JobMaxIdleConns,
-		"statement_timeout": cfg.Database.JobStatementTimeout.String(),
-	}).Info("Jobs database pool ready")
+		defer func() {
+			if err := jobsDB.Close(); err != nil {
+				logrus.WithError(err).Error("Failed to close jobs DB cleanly")
+			}
+		}()
+		logrus.WithFields(logrus.Fields{
+			"max_open":          cfg.Database.JobMaxOpenConns,
+			"max_idle":          cfg.Database.JobMaxIdleConns,
+			"statement_timeout": cfg.Database.JobStatementTimeout.String(),
+		}).Info("Jobs database pool ready")
+	}
 
 	readDB := apiDB
-	if cfg.Database.ReadDSN != "" {
+	if runAPI && cfg.Database.ReadDSN != "" {
 		readPool, err := database.OpenDSN(cfg.Database.ReadDSN, database.PoolOptions{
 			MaxOpenConns:             cfg.Database.ReadMaxOpenConns,
 			MaxIdleConns:             cfg.Database.ReadMaxIdleConns,
@@ -138,14 +168,18 @@ func main() {
 			"max_open": cfg.Database.ReadMaxOpenConns,
 			"max_idle": cfg.Database.ReadMaxIdleConns,
 		}).Warn("Read replica configured: reads may observe bounded replication lag")
-	} else {
+	} else if runAPI {
 		logrus.Info("Read replica disabled: reporting reads use the primary pool")
 	}
 
 	m := metrics.New()
-	m.RegisterDBPool("api", apiDB)
-	m.RegisterDBPool("jobs", jobsDB)
-	if cfg.Database.ReadDSN != "" {
+	if apiDB != nil {
+		m.RegisterDBPool("api", apiDB)
+	}
+	if jobsDB != nil {
+		m.RegisterDBPool("jobs", jobsDB)
+	}
+	if runAPI && cfg.Database.ReadDSN != "" {
 		m.RegisterDBPool("read", readDB)
 	}
 
@@ -158,7 +192,6 @@ func main() {
 	// =======================
 	// Background Price Jobs
 	// =======================
-	priceStore := jobs.NewPriceStore(jobsDB, nil)
 	priceServiceDone := make(chan struct{})
 	bhavcopyDone := make(chan struct{})
 
@@ -175,7 +208,8 @@ func main() {
 	freshness.MaxStale = cfg.MarketData.MaxStale
 	freshness.CloseGrace = cfg.MarketData.CloseGrace
 
-	if cfg.MarketData.Enabled {
+	if runJobs && cfg.MarketData.Enabled {
+		priceStore := jobs.NewPriceStore(jobsDB, nil)
 		provider, err := newQuoteProvider(cfg.MarketData)
 		if err != nil {
 			logrus.Fatalf("market data provider setup failed: %v", err)
@@ -198,7 +232,11 @@ func main() {
 
 		startBhavcopyService(ctx, cfg, priceStore, calendar, bhavcopyDone)
 	} else {
-		logrus.Info("Market data jobs disabled by MARKET_DATA_ENABLED=false")
+		if !runJobs {
+			logrus.Info("Market data jobs skipped: application role does not run background jobs")
+		} else {
+			logrus.Info("Market data jobs disabled by MARKET_DATA_ENABLED=false")
+		}
 		close(priceServiceDone)
 		close(bhavcopyDone)
 	}
@@ -206,61 +244,67 @@ func main() {
 	// =======================
 	// Background Corporate Action Job
 	// =======================
-	corporateActionService := jobs.NewCorporateActionServiceWithOptions(jobsDB, &jobs.CorporateActionServiceOptions{
-		Interval: cfg.Projection.CorporateActionInterval,
-		Metrics:  m,
-	})
 	corporateActionDone := make(chan struct{})
-	go func() {
-		defer close(corporateActionDone)
-		corporateActionService.Start(ctx)
-	}()
+	if runJobs {
+		corporateActionService := jobs.NewCorporateActionServiceWithOptions(jobsDB, &jobs.CorporateActionServiceOptions{
+			Interval: cfg.Projection.CorporateActionInterval,
+			Metrics:  m,
+		})
+		go func() {
+			defer close(corporateActionDone)
+			corporateActionService.Start(ctx)
+		}()
+	} else {
+		close(corporateActionDone)
+	}
 
 	// =======================
 	// Projection Queue Worker
 	// =======================
-	projectionRefreshService := jobs.NewProjectionRefreshServiceWithOptions(jobsDB, &jobs.ProjectionRefreshServiceOptions{
-		Interval:           cfg.Projection.RefreshInterval,
-		BatchSize:          cfg.Projection.RefreshBatch,
-		MaxAttempts:        cfg.Projection.QueueMaxAttempts,
-		ProcessedRetention: cfg.Projection.QueueRetention,
-		FailedRetention:    cfg.Projection.QueueFailedRetention,
-		AlertDepth:         cfg.Projection.QueueAlertDepth,
-		AlertLag:           cfg.Projection.QueueAlertLag,
-		SyncUserLimit:      cfg.Projection.SyncUserLimit,
-		Metrics:            m,
-	})
 	projectionRefreshDone := make(chan struct{})
-	go func() {
-		defer close(projectionRefreshDone)
-		projectionRefreshService.Start(ctx)
-	}()
+	if runJobs {
+		projectionRefreshService := jobs.NewProjectionRefreshServiceWithOptions(jobsDB, &jobs.ProjectionRefreshServiceOptions{
+			Interval:           cfg.Projection.RefreshInterval,
+			BatchSize:          cfg.Projection.RefreshBatch,
+			MaxAttempts:        cfg.Projection.QueueMaxAttempts,
+			ProcessedRetention: cfg.Projection.QueueRetention,
+			FailedRetention:    cfg.Projection.QueueFailedRetention,
+			AlertDepth:         cfg.Projection.QueueAlertDepth,
+			AlertLag:           cfg.Projection.QueueAlertLag,
+			SyncUserLimit:      cfg.Projection.SyncUserLimit,
+			Metrics:            m,
+		})
+		go func() {
+			defer close(projectionRefreshDone)
+			projectionRefreshService.Start(ctx)
+		}()
+	} else {
+		close(projectionRefreshDone)
+	}
 
 	// =======================
 	// Projection Reconciliation Job
 	// =======================
-	reconciliationService := jobs.NewReconciliationServiceWithOptions(jobsDB, &jobs.ReconciliationServiceOptions{
-		Interval:      cfg.Projection.ReconciliationInterval,
-		SamplePercent: cfg.Projection.ReconciliationSamplePercent,
-		MaxUsers:      cfg.Projection.ReconciliationMaxUsers,
-		Metrics:       m,
-	})
 	reconciliationDone := make(chan struct{})
-	go func() {
-		defer close(reconciliationDone)
-		reconciliationService.Start(ctx)
-	}()
+	if runJobs {
+		reconciliationService := jobs.NewReconciliationServiceWithOptions(jobsDB, &jobs.ReconciliationServiceOptions{
+			Interval:      cfg.Projection.ReconciliationInterval,
+			SamplePercent: cfg.Projection.ReconciliationSamplePercent,
+			MaxUsers:      cfg.Projection.ReconciliationMaxUsers,
+			Metrics:       m,
+		})
+		go func() {
+			defer close(reconciliationDone)
+			reconciliationService.Start(ctx)
+		}()
+	} else {
+		close(reconciliationDone)
+	}
 
 	// =======================
 	// HTTP Server
 	// =======================
 	r := gin.Default()
-	handler := stocky.NewHandler(apiDB,
-		stocky.WithReadDB(readDB),
-		stocky.WithMetrics(m),
-		stocky.WithCalendar(calendar),
-		stocky.WithFreshness(freshness),
-	)
 
 	if cfg.HTTPServer.MetricsEnabled {
 		r.Use(m.GinMiddleware())
@@ -272,8 +316,42 @@ func main() {
 		r.GET("/metrics", gin.WrapH(m.Handler()))
 	}
 
-	// Register routes with the handler
-	routes.Routes(r, handler)
+	if runAPI {
+		opts := []stocky.Option{
+			stocky.WithReadDB(readDB),
+			stocky.WithMetrics(m),
+			stocky.WithCalendar(calendar),
+			stocky.WithFreshness(freshness),
+		}
+		if cfg.HTTPServer.ETagEnabled {
+			opts = append(opts, stocky.WithResponseCache(stocky.NewResponseCache(
+				cfg.HTTPServer.ResponseCacheTTL,
+				cfg.HTTPServer.ResponseCacheMax,
+				m,
+			)))
+		}
+		if cfg.HTTPServer.RateLimitEnabled {
+			opts = append(opts, stocky.WithRateLimiter(stocky.NewUserRateLimiter(
+				cfg.HTTPServer.RateLimitRPS,
+				cfg.HTTPServer.RateLimitBurst,
+				cfg.HTTPServer.RateLimitMaxKeys,
+				m,
+			)))
+		}
+
+		handler := stocky.NewHandler(apiDB, opts...)
+		logrus.WithFields(logrus.Fields{
+			"etag":              cfg.HTTPServer.ETagEnabled,
+			"cache_ttl":         cfg.HTTPServer.ResponseCacheTTL.String(),
+			"cache_max_entries": cfg.HTTPServer.ResponseCacheMax,
+			"rate_limit":        cfg.HTTPServer.RateLimitEnabled,
+			"rate_limit_rps":    cfg.HTTPServer.RateLimitRPS,
+			"rate_limit_burst":  cfg.HTTPServer.RateLimitBurst,
+		}).Info("Read-path HTTP features configured")
+		routes.Routes(r, handler)
+	} else {
+		stocky.HealthRoute(r)
+	}
 
 	port := cfg.HTTPServer.Port
 	if port == "" {

@@ -125,3 +125,30 @@ func TestObserveQueryRecordsDurationAndError(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPCacheAndRateLimitMetrics(t *testing.T) {
+	m := New()
+	m.ObserveHTTPCache("hit")
+	m.ObserveHTTPCache("hit")
+	m.ObserveHTTPCache("miss")
+	m.ObserveHTTPCache("revalidated")
+	m.ObserveHTTPCache("evicted")
+	m.SetHTTPCacheEntries(42)
+	m.ObserveRateLimited("/api/v1/portfolio/:userId")
+	m.ObserveRateLimited("")
+
+	body := scrape(t, m)
+	for _, want := range []string{
+		`stocky_http_cache_events_total{event="hit"} 2`,
+		`stocky_http_cache_events_total{event="miss"} 1`,
+		`stocky_http_cache_events_total{event="revalidated"} 1`,
+		`stocky_http_cache_events_total{event="evicted"} 1`,
+		"stocky_http_cache_entries 42",
+		`stocky_http_rate_limited_total{route="/api/v1/portfolio/:userId"} 1`,
+		`stocky_http_rate_limited_total{route="unmatched"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %q\n%s", want, body)
+		}
+	}
+}

@@ -423,3 +423,12 @@ This document describes the Phase 0 baseline only. Later runs are archived in
   p95 20.9 ms, p99 132.7 ms, max 605.8 ms. The 1,000 req/s peak phase was
   interrupted, so the run has no `summary.txt` or `api-metrics.txt`; the full
   1-hour and 2–3× peak proof remains Phase 6.
+- **Phase 5 multi-instance implementation, 3 Nov 2026:** ETag/304 handling, a
+  per-process response cache, per-user rate limiting, and role-separated startup
+  (`APP_ROLE=all|api|worker|migrate`) were added. `bench/lb` can run multiple
+  API processes behind round-robin or user-hash routing, and
+  `docker-compose.scale.yml` shows the nginx topology. Unit tests cover cache
+  hits, 304 responses, per-user invalidation, TTL/LRU eviction, limiter bursts,
+  refill, isolation, and eviction. A full HTTP load test through the load
+  balancer has not been recorded yet; the Phase 6 1-hour profiles remain
+  outstanding.

@@ -87,9 +87,9 @@ func TestAdjustmentHandler_RewardReversalUsesPositiveRefundAmount(t *testing.T) 
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor, r\.user_id FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 5.0, 1.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor", "user_id"}).AddRow("TCS", 5.0, 1.0, 7))
 	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(5.0))
@@ -155,9 +155,9 @@ func TestAdjustmentHandler_NormalizesPostSplitQuantity(t *testing.T) {
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor, r\.user_id FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 5.0, 0.5))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor", "user_id"}).AddRow("TCS", 5.0, 0.5, 7))
 	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(10.0))
@@ -219,9 +219,9 @@ func TestAdjustmentHandler_RejectsNegativeSettledQuantity(t *testing.T) {
 	router.POST("/api/v1/adjustments/:id", handler.adjustmentHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
+	mock.ExpectQuery(`SELECT r\.stock_symbol, r\.quantity, .* AS normalization_factor, r\.user_id FROM rewards r WHERE r\.id = \$1 FOR UPDATE`).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor"}).AddRow("TCS", 0.6, 1.0))
+		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol", "quantity", "normalization_factor", "user_id"}).AddRow("TCS", 0.6, 1.0, 7))
 	mock.ExpectQuery(`SELECT COALESCE\(s\.settled_quantity, 0\) FROM reward_action_settlement\(\$1, market_today\(\)\) s`).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{"settled_quantity"}).AddRow(0.0))

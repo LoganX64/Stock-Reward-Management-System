@@ -94,6 +94,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 	var currentQty decimal.Decimal
 	var stockSymbol string
 	var normalizationFactor decimal.Decimal
+	var userID int
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 			r.stock_symbol,
@@ -102,11 +103,12 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 				r.stock_symbol,
 				r.reward_date,
 				market_today()
-			) AS normalization_factor
+			) AS normalization_factor,
+			r.user_id
 		FROM rewards r
 		WHERE r.id = $1
 		FOR UPDATE
-	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor)
+	`, rewardID).Scan(&stockSymbol, &currentQty, &normalizationFactor, &userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("reward not found"))
@@ -343,6 +345,7 @@ func (h *Handler) adjustmentHandler(c *gin.Context) {
 		return
 	}
 	committed = true
+	h.invalidateReadCache(userID)
 
 	logger.WithFields(logrus.Fields{
 		"adjustment_id": inserted.ID,

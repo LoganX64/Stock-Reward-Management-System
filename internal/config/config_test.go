@@ -130,13 +130,41 @@ func TestLoadHTTPServerDefaults(t *testing.T) {
 	if !h.MetricsEnabled {
 		t.Error("MetricsEnabled = false, want true")
 	}
+	if !h.ETagEnabled {
+		t.Error("ETagEnabled = false, want true")
+	}
+	if h.ResponseCacheTTL != 5*time.Second {
+		t.Errorf("ResponseCacheTTL = %s, want 5s", h.ResponseCacheTTL)
+	}
+	if h.ResponseCacheMax != 10000 {
+		t.Errorf("ResponseCacheMax = %d, want 10000", h.ResponseCacheMax)
+	}
+	if !h.RateLimitEnabled {
+		t.Error("RateLimitEnabled = false, want true")
+	}
+	if h.RateLimitRPS != 20 {
+		t.Errorf("RateLimitRPS = %v, want 20", h.RateLimitRPS)
+	}
+	if h.RateLimitBurst != 40 {
+		t.Errorf("RateLimitBurst = %d, want 40", h.RateLimitBurst)
+	}
+	if h.RateLimitMaxKeys != 100000 {
+		t.Errorf("RateLimitMaxKeys = %d, want 100000", h.RateLimitMaxKeys)
+	}
 }
 
 func TestLoadHTTPServerOverrides(t *testing.T) {
 	h, err := loadHTTPServer(envValues(map[string]string{
-		"HTTP_PORT":            "9090",
-		"HTTP_REQUEST_TIMEOUT": "5s",
-		"METRICS_ENABLED":      "false",
+		"HTTP_PORT":                       "9090",
+		"HTTP_REQUEST_TIMEOUT":            "5s",
+		"METRICS_ENABLED":                 "false",
+		"HTTP_ETAG_ENABLED":               "false",
+		"HTTP_RESPONSE_CACHE_TTL":         "30s",
+		"HTTP_RESPONSE_CACHE_MAX_ENTRIES": "500",
+		"HTTP_RATE_LIMIT_ENABLED":         "false",
+		"HTTP_RATE_LIMIT_RPS":             "7.5",
+		"HTTP_RATE_LIMIT_BURST":           "15",
+		"HTTP_RATE_LIMIT_MAX_KEYS":        "250",
 	}))
 	if err != nil {
 		t.Fatalf("loadHTTPServer() error = %v", err)
@@ -144,13 +172,51 @@ func TestLoadHTTPServerOverrides(t *testing.T) {
 	if h.Port != ":9090" || h.RequestTimeout != 5*time.Second || h.MetricsEnabled {
 		t.Errorf("loadHTTPServer() = %+v, want :9090/5s/false", h)
 	}
+	if h.ETagEnabled {
+		t.Error("ETagEnabled = true, want false")
+	}
+	if h.ResponseCacheTTL != 30*time.Second || h.ResponseCacheMax != 500 {
+		t.Errorf("cache = %s/%d, want 30s/500", h.ResponseCacheTTL, h.ResponseCacheMax)
+	}
+	if h.RateLimitEnabled {
+		t.Error("RateLimitEnabled = true, want false")
+	}
+	if h.RateLimitRPS != 7.5 || h.RateLimitBurst != 15 || h.RateLimitMaxKeys != 250 {
+		t.Errorf("rate limit = %v/%d/%d, want 7.5/15/250", h.RateLimitRPS, h.RateLimitBurst, h.RateLimitMaxKeys)
+	}
+}
+
+func TestLoadHTTPServerAcceptsDisabledCache(t *testing.T) {
+	h, err := loadHTTPServer(envValues(map[string]string{
+		"HTTP_RESPONSE_CACHE_TTL":         "0s",
+		"HTTP_RESPONSE_CACHE_MAX_ENTRIES": "0",
+	}))
+	if err != nil {
+		t.Fatalf("loadHTTPServer() error = %v", err)
+	}
+	if h.ResponseCacheTTL != 0 || h.ResponseCacheMax != 0 {
+		t.Fatalf("cache = %s/%d, want 0s/0", h.ResponseCacheTTL, h.ResponseCacheMax)
+	}
 }
 
 func TestLoadHTTPServerRejectsInvalidValues(t *testing.T) {
 	cases := map[string]map[string]string{
-		"request timeout": {"HTTP_REQUEST_TIMEOUT": "0s"},
-		"bad duration":    {"HTTP_REQUEST_TIMEOUT": "soon"},
-		"bad bool":        {"METRICS_ENABLED": "maybe"},
+		"request timeout":     {"HTTP_REQUEST_TIMEOUT": "0s"},
+		"bad duration":        {"HTTP_REQUEST_TIMEOUT": "soon"},
+		"bad bool":            {"METRICS_ENABLED": "maybe"},
+		"negative cache ttl":  {"HTTP_RESPONSE_CACHE_TTL": "-1s"},
+		"bad cache ttl":       {"HTTP_RESPONSE_CACHE_TTL": "later"},
+		"negative cache size": {"HTTP_RESPONSE_CACHE_MAX_ENTRIES": "-1"},
+		"bad cache size":      {"HTTP_RESPONSE_CACHE_MAX_ENTRIES": "many"},
+		"bad etag bool":       {"HTTP_ETAG_ENABLED": "maybe"},
+		"bad rate limit bool": {"HTTP_RATE_LIMIT_ENABLED": "maybe"},
+		"zero rate":           {"HTTP_RATE_LIMIT_RPS": "0"},
+		"negative rate":       {"HTTP_RATE_LIMIT_RPS": "-5"},
+		"bad rate":            {"HTTP_RATE_LIMIT_RPS": "fast"},
+		"zero burst":          {"HTTP_RATE_LIMIT_BURST": "0"},
+		"bad burst":           {"HTTP_RATE_LIMIT_BURST": "many"},
+		"zero max keys":       {"HTTP_RATE_LIMIT_MAX_KEYS": "0"},
+		"bad max keys":        {"HTTP_RATE_LIMIT_MAX_KEYS": "many"},
 	}
 	for name, values := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -158,6 +224,38 @@ func TestLoadHTTPServerRejectsInvalidValues(t *testing.T) {
 				t.Fatal("loadHTTPServer() error = nil, want validation error")
 			}
 		})
+	}
+}
+
+func TestLoadRole(t *testing.T) {
+	cases := map[string]string{
+		"":        "all",
+		"all":     "all",
+		"api":     "api",
+		"worker":  "worker",
+		"migrate": "migrate",
+		" API ":   "api",
+		"Worker":  "worker",
+	}
+	for raw, want := range cases {
+		values := map[string]string{}
+		if raw != "" {
+			values["APP_ROLE"] = raw
+		}
+		got, err := loadRole(envValues(values))
+		if err != nil {
+			t.Errorf("loadRole(%q) error = %v", raw, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("loadRole(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestLoadRoleRejectsUnknownValue(t *testing.T) {
+	if _, err := loadRole(envValues(map[string]string{"APP_ROLE": "scheduler"})); err == nil {
+		t.Fatal("loadRole() accepted an unknown role")
 	}
 }
 
@@ -491,6 +589,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("MARKET_DATA_PROVIDER", "simulator")
 	t.Setenv("MARKET_DATA_EXCHANGE", "NSE")
 	t.Setenv("MARKET_DATA_BHAVCOPY_ENABLED", "false")
+	t.Setenv("APP_ROLE", "api")
+	t.Setenv("RUN_MIGRATIONS_ON_START", "false")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -501,6 +601,12 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if cfg.MarketData.BhavcopyEnabled {
 		t.Error("BhavcopyEnabled = true, want false")
+	}
+	if cfg.Role != "api" {
+		t.Errorf("Role = %q, want api", cfg.Role)
+	}
+	if cfg.RunMigrations {
+		t.Error("RunMigrations = true, want false")
 	}
 }
 

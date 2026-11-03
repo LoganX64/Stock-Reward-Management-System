@@ -18,6 +18,21 @@ type HTTPServer struct {
 	Port           string
 	RequestTimeout time.Duration
 	MetricsEnabled bool
+
+	// ETagEnabled adds validators to the read responses. ResponseCacheTTL
+	// controls the per-instance cache used to answer matching conditional
+	// requests without a database query. Zero disables the cache while keeping
+	// ETag/304 support.
+	ETagEnabled      bool
+	ResponseCacheTTL time.Duration
+	ResponseCacheMax int
+
+	// Read rate limiting is per user (or per client IP when no userId route
+	// parameter exists). It is enforced per API instance.
+	RateLimitEnabled bool
+	RateLimitRPS     float64
+	RateLimitBurst   int
+	RateLimitMaxKeys int
 }
 
 type Database struct {
@@ -98,6 +113,8 @@ type Projection struct {
 
 type Config struct {
 	Env           string
+	Role          string
+	RunMigrations bool
 	Database      Database
 	HTTPServer    HTTPServer
 	MigrationPath string
@@ -144,8 +161,20 @@ func LoadFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	role, err := loadRole(getEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	runMigrations, err := getBoolEnv(getEnv, "RUN_MIGRATIONS_ON_START", "true")
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Env:           getEnv("ENV", "dev"),
+		Role:          role,
+		RunMigrations: runMigrations,
 		Database:      database,
 		HTTPServer:    httpServer,
 		MigrationPath: getEnv("MIGRATION_PATH", "./internal/database/migrations"),
@@ -164,11 +193,28 @@ func MustLoad() *Config {
 	return cfg
 }
 
+func loadRole(getEnv func(string, string) string) (string, error) {
+	role := strings.ToLower(strings.TrimSpace(getEnv("APP_ROLE", "all")))
+	switch role {
+	case "all", "api", "worker", "migrate":
+		return role, nil
+	default:
+		return "", fmt.Errorf("APP_ROLE: unsupported role %q (want all, api, worker, or migrate)", role)
+	}
+}
+
 func loadHTTPServer(getEnv func(string, string) string) (HTTPServer, error) {
 	h := HTTPServer{
-		Port:           ":" + getEnv("HTTP_PORT", "8080"),
-		RequestTimeout: 10 * time.Second,
-		MetricsEnabled: true,
+		Port:             ":" + getEnv("HTTP_PORT", "8080"),
+		RequestTimeout:   10 * time.Second,
+		MetricsEnabled:   true,
+		ETagEnabled:      true,
+		ResponseCacheTTL: 5 * time.Second,
+		ResponseCacheMax: 10000,
+		RateLimitEnabled: true,
+		RateLimitRPS:     20,
+		RateLimitBurst:   40,
+		RateLimitMaxKeys: 100000,
 	}
 
 	var err error
@@ -178,8 +224,44 @@ func loadHTTPServer(getEnv func(string, string) string) (HTTPServer, error) {
 	if h.MetricsEnabled, err = getBoolEnv(getEnv, "METRICS_ENABLED", "true"); err != nil {
 		return h, err
 	}
+	if h.ETagEnabled, err = getBoolEnv(getEnv, "HTTP_ETAG_ENABLED", "true"); err != nil {
+		return h, err
+	}
+	if h.ResponseCacheTTL, err = getDurationEnv(getEnv, "HTTP_RESPONSE_CACHE_TTL", "5s"); err != nil {
+		return h, err
+	}
+	if h.ResponseCacheMax, err = getIntEnv(getEnv, "HTTP_RESPONSE_CACHE_MAX_ENTRIES", "10000"); err != nil {
+		return h, err
+	}
+	if h.RateLimitEnabled, err = getBoolEnv(getEnv, "HTTP_RATE_LIMIT_ENABLED", "true"); err != nil {
+		return h, err
+	}
+	if h.RateLimitRPS, err = getFloatEnv(getEnv, "HTTP_RATE_LIMIT_RPS", "20"); err != nil {
+		return h, err
+	}
+	if h.RateLimitBurst, err = getIntEnv(getEnv, "HTTP_RATE_LIMIT_BURST", "40"); err != nil {
+		return h, err
+	}
+	if h.RateLimitMaxKeys, err = getIntEnv(getEnv, "HTTP_RATE_LIMIT_MAX_KEYS", "100000"); err != nil {
+		return h, err
+	}
 	if h.RequestTimeout <= 0 {
 		return h, fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be greater than zero")
+	}
+	if h.ResponseCacheTTL < 0 {
+		return h, fmt.Errorf("HTTP_RESPONSE_CACHE_TTL: must not be negative")
+	}
+	if h.ResponseCacheMax < 0 {
+		return h, fmt.Errorf("HTTP_RESPONSE_CACHE_MAX_ENTRIES: must not be negative")
+	}
+	if h.RateLimitRPS <= 0 {
+		return h, fmt.Errorf("HTTP_RATE_LIMIT_RPS: must be greater than zero")
+	}
+	if h.RateLimitBurst < 1 {
+		return h, fmt.Errorf("HTTP_RATE_LIMIT_BURST: must be at least 1")
+	}
+	if h.RateLimitMaxKeys < 1 {
+		return h, fmt.Errorf("HTTP_RATE_LIMIT_MAX_KEYS: must be at least 1")
 	}
 
 	return h, nil

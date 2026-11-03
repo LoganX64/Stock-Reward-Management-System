@@ -112,17 +112,22 @@ func parsePagination(c *gin.Context) (int, int, bool) {
 	return limit, offset, true
 }
 
-// Routes now accepts the handler
-func Routes(r *gin.Engine, handler *Handler) {
-	r.Use(RequestIDLogger())
-
-	// Health check
+// HealthRoute registers the liveness endpoint. Worker-only processes expose it
+// to Docker/orchestrator health checks without mounting the API routes.
+func HealthRoute(r *gin.Engine) {
 	r.GET("/health", func(c *gin.Context) {
 		getLogger(c).Info("Health check endpoint hit")
 		response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 			"status": "OK",
 		})
 	})
+}
+
+// Routes now accepts the handler
+func Routes(r *gin.Engine, handler *Handler) {
+	r.Use(RequestIDLogger())
+
+	HealthRoute(r)
 
 	// API v1 group
 	v1 := r.Group("/api/v1")
@@ -130,9 +135,24 @@ func Routes(r *gin.Engine, handler *Handler) {
 		v1.POST("/reward", handler.CreateReward)
 		v1.POST("/adjustments/:id", handler.adjustmentHandler)
 
-		v1.GET("/today-stocks/:userId", handler.GetTodayStocks)
-		v1.GET("/historical-inr/:userId", handler.GetHistoricalINR)
-		v1.GET("/stats/:userId", handler.StatsHandler)
-		v1.GET("/portfolio/:userId", handler.PortfolioHandler)
+		// Read endpoints are rate-limited per user. Portfolio and stats also
+		// answer conditional requests from the local ETag cache; the other
+		// reads stay uncached because their query space is larger.
+		reads := v1.Group("")
+		if handler.rateLimiter != nil {
+			reads.Use(handler.rateLimiter.Middleware())
+		}
+		reads.GET("/today-stocks/:userId", handler.GetTodayStocks)
+		reads.GET("/historical-inr/:userId", handler.GetHistoricalINR)
+		reads.GET("/stats/:userId", handler.readHandler(handler.StatsHandler))
+		reads.GET("/portfolio/:userId", handler.readHandler(handler.PortfolioHandler))
 	}
+}
+
+// readHandler applies the optional ETag/response cache to one read handler.
+func (h *Handler) readHandler(next gin.HandlerFunc) gin.HandlerFunc {
+	if h.responseCache == nil {
+		return next
+	}
+	return h.responseCache.Middleware(next)
 }

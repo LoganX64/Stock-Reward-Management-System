@@ -21,6 +21,10 @@ type Metrics struct {
 	httpDuration *prometheus.HistogramVec
 	httpInFlight prometheus.Gauge
 
+	httpCacheEvents  *prometheus.CounterVec
+	httpCacheEntries prometheus.Gauge
+	httpRateLimited  *prometheus.CounterVec
+
 	queryDuration *prometheus.HistogramVec
 	queryErrors   *prometheus.CounterVec
 
@@ -82,6 +86,21 @@ func New() *Metrics {
 		Name: "stocky_http_in_flight_requests",
 		Help: "HTTP requests currently being served.",
 	})
+
+	m.httpCacheEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "stocky_http_cache_events_total",
+		Help: "Read response cache events by result.",
+	}, []string{"event"})
+
+	m.httpCacheEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "stocky_http_cache_entries",
+		Help: "Responses currently stored in the local read cache.",
+	})
+
+	m.httpRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "stocky_http_rate_limited_total",
+		Help: "Read requests rejected by the per-user rate limiter.",
+	}, []string{"route"})
 
 	m.queryDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "stocky_db_query_duration_seconds",
@@ -154,6 +173,9 @@ func New() *Metrics {
 		m.httpRequests,
 		m.httpDuration,
 		m.httpInFlight,
+		m.httpCacheEvents,
+		m.httpCacheEntries,
+		m.httpRateLimited,
 		m.queryDuration,
 		m.queryErrors,
 		m.projectionQueuePending,
@@ -202,6 +224,33 @@ func (m *Metrics) GinMiddleware() gin.HandlerFunc {
 		m.httpRequests.WithLabelValues(c.Request.Method, route, status).Inc()
 		m.httpDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(start).Seconds())
 	}
+}
+
+// ObserveHTTPCache records a cache hit, miss, revalidation, or eviction.
+func (m *Metrics) ObserveHTTPCache(event string) {
+	if m == nil {
+		return
+	}
+	m.httpCacheEvents.WithLabelValues(event).Inc()
+}
+
+// SetHTTPCacheEntries publishes the current local response-cache size.
+func (m *Metrics) SetHTTPCacheEntries(entries int) {
+	if m == nil {
+		return
+	}
+	m.httpCacheEntries.Set(float64(entries))
+}
+
+// ObserveRateLimited records a read request rejected by the per-user limiter.
+func (m *Metrics) ObserveRateLimited(route string) {
+	if m == nil {
+		return
+	}
+	if route == "" {
+		route = "unmatched"
+	}
+	m.httpRateLimited.WithLabelValues(route).Inc()
 }
 
 // ObserveQuery records a named query's duration and error outcome.

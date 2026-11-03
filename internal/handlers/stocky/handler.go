@@ -3,6 +3,7 @@ package stocky
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/marketcal"
@@ -30,6 +31,12 @@ type Handler struct {
 	// Now is the clock used for freshness classification. It is injectable so
 	// tests and replays can produce deterministic freshness values.
 	Now func() time.Time
+
+	// responseCache and rateLimiter are optional Phase 5 read-path middleware.
+	// They are per process; a write on another API instance cannot invalidate
+	// this cache directly, so the cache TTL bounds staleness.
+	responseCache *ResponseCache
+	rateLimiter   *UserRateLimiter
 }
 
 // Option customises a Handler without breaking existing NewHandler(db) calls.
@@ -82,6 +89,34 @@ func WithMetrics(m *metrics.Metrics) Option {
 			h.Metrics = m
 		}
 	}
+}
+
+// WithResponseCache enables ETag/If-None-Match handling and the optional
+// short-lived response cache for portfolio and stats reads.
+func WithResponseCache(cache *ResponseCache) Option {
+	return func(h *Handler) {
+		if cache != nil {
+			h.responseCache = cache
+		}
+	}
+}
+
+// WithRateLimiter enables per-user read rate limiting.
+func WithRateLimiter(limiter *UserRateLimiter) Option {
+	return func(h *Handler) {
+		if limiter != nil {
+			h.rateLimiter = limiter
+		}
+	}
+}
+
+// invalidateReadCache drops this user's cached reads after a successful write.
+// The cache is only local to this process; TTL covers writes made elsewhere.
+func (h *Handler) invalidateReadCache(userID int) {
+	if h == nil || h.responseCache == nil || userID <= 0 {
+		return
+	}
+	h.responseCache.InvalidateUser(strconv.Itoa(userID))
 }
 
 // NewHandler creates a new Handler instance with injected dependencies
