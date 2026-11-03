@@ -224,6 +224,54 @@ times. Result: 387–693 ms instead of 60 seconds.
 This is the key architectural clue for Phase 1: the problem is not PostgreSQL
 itself, it is the uncorrelated per-reward function call in the current views.
 
+### Phase 3 query set (current harness)
+
+The Phase 0 measurements above remain the baseline, but the query files that
+produced them no longer describe the API. Phase 3 replaced the five-query
+portfolio path:
+
+| Phase 0 file | Phase 3 replacement |
+|---|---|
+| `portfolio_page.sql` | `portfolio_page.sql` (unchanged shape) |
+| `portfolio_totals.sql` | `portfolio_summary.sql` |
+| `portfolio_freshness.sql` | `portfolio_summary.sql` |
+| `portfolio_unpriced.sql` | `portfolio_summary.sql` |
+| `portfolio_cash.sql` | `portfolio_summary.sql` |
+| `today.sql` | `today.sql` (direct `reward_state` query) |
+| `historical.sql` | `historical.sql` (calls `historical_rewards_for_user()`) |
+| — | `stats_today.sql` (new) |
+
+Current query counts:
+
+| Endpoint | Before Phase 3 | After Phase 3 |
+|---|---:|---:|
+| `GET /portfolio` | 5 | 2 |
+| `GET /stats` | 5 | 2 |
+| `GET /today-stocks` | 1 | 1 |
+| `GET /historical-inr` | 2 | 1 |
+
+The Phase 0 execution times in section 6 must not be compared directly with a
+new `plans.txt` produced from the current files: the old portfolio summary files
+no longer exist, and `historical.sql` now invokes the user-scoped function once
+instead of the all-rewards function twice. The post-Phase 3 capture is in
+`bench/results/manual-phase3/`:
+
+| Query file | Rows | Execution time |
+|---|---:|---:|
+| `portfolio_page.sql` | 25 | 8.021 ms |
+| `portfolio_summary.sql` | 25 | 4.162 ms |
+| `stats_today.sql` | 0 / 1 | 1.485 ms / 0.040 ms |
+| `today.sql` | 0 / 1 | 0.151 ms / 0.311 ms |
+| `historical.sql` grant-date | 25 | 41.570 ms |
+| `historical.sql` as-of | 23 | 11.531 ms |
+
+The plans use `portfolio_position_pkey`, `idx_reward_state_user_date`, and
+`idx_rewards_user_date`, with no sequential scan on `rewards`, `reward_state`,
+`portfolio_position`, or `reward_corporate_action_outcomes`. The
+`stats_today`/`today` pairs show user 1 (no rewards today) and a row-bearing
+user 40. These are single-statement plans; the Phase 6 HTTP load test is still
+outstanding.
+
 ### Capacity implication
 
 With the 25-connection API pool:
@@ -361,3 +409,9 @@ This document describes the Phase 0 baseline only. Later runs are archived in
   benchmark, the live rebuild check, the full test-suite log, and the per-test
   results. No HTTP load test has been run after Phase 2; the Phase 6 1-hour
   profiles remain outstanding.
+- **Phase 3 read path, 3 Nov 2026:** `/portfolio` and `/stats` were reduced to
+  two queries each, `/today-stocks` reads `reward_state` directly, and
+  `/historical-inr` calls `historical_rewards_for_user()` once. The benchmark
+  query set now mirrors those statements (`portfolio_summary.sql` and
+  `stats_today.sql` replace the four obsolete portfolio files). No HTTP load
+  test has been run after Phase 3; the Phase 6 profiles remain outstanding.

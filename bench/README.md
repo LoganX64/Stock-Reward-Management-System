@@ -2,8 +2,9 @@
 
 This directory contains the measurement harness for the read-path projection
 plan. Phase 0 established the baseline against the original computational views;
-Phase 2 adds write-overhead and live-rebuild checks for the maintained
-projections.
+Phase 2 added write-overhead and live-rebuild checks for the maintained
+projections; Phase 3 rewrote the read path and replaced the portfolio query set
+with the handler's two-query page-plus-summary shape.
 
 See `../read-path-projection-plan.md` for the full plan and
 `../load-test.md` for the Phase 0 load-test setup and baseline findings.
@@ -13,9 +14,11 @@ The test is run with Go. `bench/phase0` is the orchestrator.
 ## What it measures
 
 - `EXPLAIN (ANALYZE, BUFFERS)` for the current hot queries:
-  - portfolio page, totals, freshness, unpriced symbols, corporate-action cash
-  - today
-  - historical grant-date and as-of modes
+  - portfolio page and the full-set portfolio summary
+  - stats today rewards
+  - today rewards
+  - historical grant-date and as-of modes through
+    `historical_rewards_for_user()`, including its full-set unpriced summary
 - End-to-end latency at three load levels:
   - warm-up: 50 req/s
   - steady: 278 req/s (1M requests/hour)
@@ -238,6 +241,80 @@ Raw output and test logs for these checks are recorded in
 [`results/manual-phase2/README.md`](results/manual-phase2/README.md). That record
 also lists the Phase 2 integration tests and the status of the HTTP load test.
 
+## Phase 3 read-path queries
+
+Phase 3 removed the repeated `user_portfolio` scans. The files in `queries/`
+mirror the SQL the handlers now issue:
+
+| Query file | Endpoint | Queries per request |
+|---|---|---:|
+| `portfolio_page.sql` | `/portfolio` page | 1 |
+| `portfolio_summary.sql` | `/portfolio` totals, unpriced set, freshness, and cash | 1 |
+| `stats_today.sql` | `/stats` today rewards | 1 |
+| `portfolio_summary.sql` | `/stats` totals, unpriced set, freshness, and cash | 1 |
+| `today.sql` | `/today-stocks` | 1 |
+| `historical.sql` | `/historical-inr` grant-date and as-of modes | 1 |
+
+Query counts per endpoint:
+
+| Endpoint | Before Phase 3 | After Phase 3 |
+|---|---:|---:|
+| `GET /portfolio` | 5 | 2 |
+| `GET /stats` | 5 | 2 |
+| `GET /today-stocks` | 1 | 1 |
+| `GET /historical-inr` | 2 | 1 |
+
+`/portfolio` and `/stats` keep one read-only `REPEATABLE READ` transaction so
+the page and the summary describe the same MVCC snapshot and market date.
+`/today-stocks` and `/historical-inr` are single statements and do not open a
+snapshot transaction.
+
+The expected plan properties on the seeded dataset are:
+
+- `portfolio_page.sql` uses the `portfolio_position` primary key
+  `(user_id, terminal_symbol)` and joins `stock_prices_adjusted` by symbol.
+- `portfolio_summary.sql` reads the user's `portfolio_position` rows once,
+  joins `stock_prices_adjusted`, and reads the single `user_cash_position` row.
+  The `(SELECT 1) AS anchor` keeps one result row for an empty portfolio.
+- `stats_today.sql` filters `reward_state` by `user_id`,
+  `reward_date = market_today()`, and `is_active` through
+  `idx_reward_state_user_date`. `today.sql` applies the same filter before its
+  price join.
+- `historical.sql` filters `rewards` by `user_id` and date in the page CTE
+  before calling `reward_corporate_action_outcome()` only for the page rows. The
+  summary function performs its own user-scoped pass so an empty page still
+  reports valuation completeness.
+
+Capture the plans with the standard command:
+
+```powershell
+.\bench\bin\dbtool.exe -database stocky_bench -out bench\results\plans.txt explain
+```
+
+Measured on 3 Nov 2026 against the seeded `stocky_bench` database after
+migration `0029`:
+
+| Query file | Rows | Execution time |
+|---|---:|---:|
+| `portfolio_page.sql` | 25 | 8.021 ms |
+| `portfolio_summary.sql` | 25 | 4.162 ms |
+| `stats_today.sql` | 0 / 1 | 1.485 ms / 0.040 ms |
+| `today.sql` | 0 / 1 | 0.151 ms / 0.311 ms |
+| `historical.sql` grant-date | 25 | 41.570 ms |
+| `historical.sql` as-of | 23 | 11.531 ms |
+
+The `stats_today` and `today` rows show user 1 (no rewards today) and a
+row-bearing user 40. Full plans and plan notes are in
+[`results/manual-phase3/README.md`](results/manual-phase3/README.md) and
+[`results/manual-phase3/plans.txt`](results/manual-phase3/plans.txt). The plans
+use `portfolio_position_pkey`, `idx_reward_state_user_date`, and
+`idx_rewards_user_date`; none sequentially scans `rewards`, `reward_state`,
+`portfolio_position`, or `reward_corporate_action_outcomes`.
+
+The removed `portfolio_totals.sql`, `portfolio_freshness.sql`,
+`portfolio_unpriced.sql`, and `portfolio_cash.sql` files described the Phase 0
+five-query implementation and no longer match the API.
+
 ## Dataset
 
 Defaults are sized for a 12 vCPU / 8 GB local machine:
@@ -305,5 +382,6 @@ finding.
 ## Phase boundary
 
 The harness only measures. Phase 1 added the projection schema and rebuild step
-used above. Phase 2 adds the queue, rollover due checks, reconciliation, and the
-two write-path checks. Read-path handler changes belong to Phase 3.
+used above. Phase 2 added the queue, rollover due checks, reconciliation, and the
+two write-path checks. Phase 3 replaced the read-path SQL and the query set used
+for plan capture; the handler and integration tests live outside this directory.

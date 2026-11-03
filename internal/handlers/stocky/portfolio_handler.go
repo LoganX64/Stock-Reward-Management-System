@@ -26,9 +26,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	// Every read in this response shares one read-only repeatable-read
-	// snapshot. That keeps the page, the full-set totals, the unpriced set, and
-	// the corporate-action outcome on the same valuation date and MVCC state.
+	// The page and the full-set summary share one read-only repeatable-read
+	// snapshot, so totals, valuation gaps, freshness, and the corporate-action
+	// outcome all describe the same market date and MVCC state.
 	tx, err := h.beginReadSnapshot(c.Request.Context())
 	if err != nil {
 		logger.WithError(err).Error("Failed to start portfolio read snapshot")
@@ -122,30 +122,9 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		return
 	}
 
-	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(tx, userID)
+	summary, err := h.getPortfolioSummary(tx, userID)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
-		return
-	}
-
-	totalPortfolioValue, totalPositions, valuationDate, err := h.getPortfolioTotals(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio totals")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
-		return
-	}
-
-	freshness, err := h.getPortfolioFreshness(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio freshness")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
-		return
-	}
-
-	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
+		logger.WithError(err).Error("Failed to fetch portfolio summary")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
 		return
 	}
@@ -161,17 +140,17 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		"limit":               limit,
 		"offset":              offset,
 		"portfolio":           utils.OrEmpty(portfolio),
-		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
-		"totalPositions":      totalPositions,
-		"valuationDate":       valuationDate,
-		"valuationComplete":   len(unpricedSymbols) == 0,
-		"unpricedPositions":   len(unpricedSymbols),
-		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
-		"stalePositions":      freshness.StalePositions,
-		"staleSymbols":        utils.OrEmpty(freshness.StaleSymbols),
-		"pricesFresh":         freshness.PricesFresh,
-		"cashProceeds":        utils.RoundAmount(cashProceeds),
-		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
-		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),
+		"totalPortfolioValue": utils.RoundAmount(summary.TotalPortfolioValue),
+		"totalPositions":      summary.TotalPositions,
+		"valuationDate":       summary.ValuationDate,
+		"valuationComplete":   len(summary.UnpricedSymbols) == 0,
+		"unpricedPositions":   len(summary.UnpricedSymbols),
+		"unpricedSymbols":     utils.OrEmpty(summary.UnpricedSymbols),
+		"stalePositions":      summary.StalePositions,
+		"staleSymbols":        utils.OrEmpty(summary.StaleSymbols),
+		"pricesFresh":         summary.PricesFresh,
+		"cashProceeds":        utils.RoundAmount(summary.CashProceeds),
+		"cashInLieuProceeds":  utils.RoundAmount(summary.CashInLieuProceeds),
+		"writtenOffQuantity":  utils.RoundQuantity(summary.WrittenOffQuantity),
 	})
 }

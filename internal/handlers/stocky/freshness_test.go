@@ -28,7 +28,7 @@ func TestGetTodayStocks_ReportsFreshnessAndProvenance(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/today-stocks/:userId", handler.GetTodayStocks)
 
-	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM reward_state rs")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"reward_event_id",
@@ -130,7 +130,7 @@ func TestGetTodayStocks_MissingPricesAreNotStale(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/today-stocks/:userId", handler.GetTodayStocks)
 
-	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM reward_state rs")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"reward_event_id",
@@ -193,36 +193,22 @@ func TestPortfolioHandler_FullSetFreshnessIgnoresPagination(t *testing.T) {
 			"price_fetched_at",
 		}).AddRow("A", 10.0, 100.0, 1000.0, "available", now.Add(-30*time.Minute), "yahoo", now.Add(-29*time.Minute)))
 
-	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}))
-
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
-			"valuation_date",
-		}).AddRow(1000.0, 2, "2026-11-02"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"price_status",
 			"price_as_of",
 			"price_source",
-		}).
-			AddRow("A", "available", now.Add(-30*time.Minute), "yahoo").
-			AddRow("Z", "available", now.Add(-2*time.Hour), "yahoo"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
+			"current_price",
+			"inr_value",
 			"cash_proceeds",
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
-		}).AddRow(0.0, 0.0, 0.0))
+			"valuation_date",
+		}).
+			AddRow("A", "available", now.Add(-30*time.Minute), "yahoo", 100.0, 1000.0, 0.0, 0.0, 0.0, "2026-11-02").
+			AddRow("Z", "available", now.Add(-2*time.Hour), "yahoo", 90.0, 2000.0, 0.0, 0.0, 0.0, "2026-11-02"))
 	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portfolio/1", nil)

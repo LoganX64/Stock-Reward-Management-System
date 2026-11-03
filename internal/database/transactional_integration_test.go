@@ -44,8 +44,8 @@ func TestCleanMigrationIntegration(t *testing.T) {
 	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version != 28 {
-		t.Errorf("migration version = %d, want 28", version)
+	if version != 29 {
+		t.Errorf("migration version = %d, want 29", version)
 	}
 	if dirty {
 		t.Error("schema_migrations is dirty after a clean migration")
@@ -88,6 +88,8 @@ func TestCleanMigrationIntegration(t *testing.T) {
 		"reward_action_settlement",
 		"process_corporate_action_cash",
 		"historical_rewards_as_of",
+		"historical_rewards_for_user",
+		"historical_unpriced_rewards_for_user",
 		"market_data_source_rank",
 		"reward_corporate_action_outcome_base",
 		"refresh_reward_state",

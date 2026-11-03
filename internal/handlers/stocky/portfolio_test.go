@@ -76,34 +76,20 @@ func TestPortfolioHandler_ReturnsHoldingsAndCashOutcome(t *testing.T) {
 			"price_fetched_at",
 		}).AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now(), "yahoo", time.Now()))
 
-	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}))
-
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
-			"valuation_date",
-		}).AddRow(10000.0, 1, "2026-10-28"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"price_status",
 			"price_as_of",
 			"price_source",
-		}).AddRow("B", "available", time.Now(), "yahoo"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
+			"current_price",
+			"inr_value",
 			"cash_proceeds",
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
-		}).AddRow(1000.0, 0.0, 400.0))
+			"valuation_date",
+		}).AddRow("B", "available", time.Now(), "yahoo", 50.0, 10000.0, 1000.0, 0.0, 400.0, "2026-10-28"))
 	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portfolio/1", nil)
@@ -177,36 +163,22 @@ func TestPortfolioHandler_ReturnsMissingPriceHolding(t *testing.T) {
 			AddRow("B", 200.0, 50.0, 10000.0, "available", time.Now(), "yahoo", time.Now()).
 			AddRow("NEWCO", 10.0, nil, nil, "missing", nil, nil, nil))
 
-	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}).AddRow("NEWCO"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
-			"valuation_date",
-		}).AddRow(10000.0, 2, "2026-10-28"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"price_status",
 			"price_as_of",
 			"price_source",
-		}).
-			AddRow("B", "available", time.Now(), "yahoo").
-			AddRow("NEWCO", "missing", nil, nil))
-
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
+			"current_price",
+			"inr_value",
 			"cash_proceeds",
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
-		}).AddRow(0.0, 0.0, 0.0))
+			"valuation_date",
+		}).
+			AddRow("B", "available", time.Now(), "yahoo", 50.0, 10000.0, 0.0, 0.0, 0.0, "2026-10-28").
+			AddRow("NEWCO", "missing", nil, nil, nil, nil, 0.0, 0.0, 0.0, "2026-10-28"))
 	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portfolio/1", nil)
@@ -261,7 +233,7 @@ func TestPortfolioHandler_ReturnsMissingPriceHolding(t *testing.T) {
 	}
 }
 
-func TestGetPortfolioTotals_ZeroHoldings(t *testing.T) {
+func TestGetPortfolioSummary_ZeroHoldings(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("failed to open sqlmock database: %v", err)
@@ -270,26 +242,42 @@ func TestGetPortfolioTotals_ZeroHoldings(t *testing.T) {
 
 	handler := NewHandler(db)
 
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(9).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
+			"stock_symbol",
+			"price_status",
+			"price_as_of",
+			"price_source",
+			"current_price",
+			"inr_value",
+			"cash_proceeds",
+			"written_off_quantity",
+			"cash_in_lieu_proceeds",
 			"valuation_date",
-		}).AddRow(0.0, 0, "2026-10-28"))
+		}).AddRow(nil, nil, nil, nil, nil, nil, nil, nil, nil, "2026-10-28"))
 
-	value, positions, valuationDate, err := handler.getPortfolioTotals(db, 9)
+	summary, err := handler.getPortfolioSummary(db, 9)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !value.IsZero() {
-		t.Errorf("expected zero value, got %v", value)
+	if !summary.TotalPortfolioValue.IsZero() {
+		t.Errorf("expected zero value, got %v", summary.TotalPortfolioValue)
 	}
-	if positions != 0 {
-		t.Errorf("expected zero positions, got %v", positions)
+	if summary.TotalPositions != 0 {
+		t.Errorf("expected zero positions, got %v", summary.TotalPositions)
 	}
-	if valuationDate != "2026-10-28" {
-		t.Errorf("expected valuation date 2026-10-28, got %v", valuationDate)
+	if summary.ValuationDate != "2026-10-28" {
+		t.Errorf("expected valuation date 2026-10-28, got %v", summary.ValuationDate)
+	}
+	if !summary.PricesFresh {
+		t.Error("expected an empty portfolio to be fresh")
+	}
+	if len(summary.UnpricedSymbols) != 0 {
+		t.Errorf("expected no unpriced symbols, got %v", summary.UnpricedSymbols)
+	}
+	if len(summary.StaleSymbols) != 0 {
+		t.Errorf("expected no stale symbols, got %v", summary.StaleSymbols)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

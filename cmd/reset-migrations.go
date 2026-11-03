@@ -33,6 +33,8 @@ func main() {
 		DROP FUNCTION IF EXISTS projection_sync_user_limit() CASCADE;
 		DROP FUNCTION IF EXISTS normalize_instrument_symbol_trigger() CASCADE;
 		DROP FUNCTION IF EXISTS normalize_instrument_symbol(TEXT) CASCADE;
+		DROP FUNCTION IF EXISTS historical_rewards_for_user(INTEGER, DATE, INTEGER, INTEGER) CASCADE;
+		DROP FUNCTION IF EXISTS historical_unpriced_rewards_for_user(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS historical_rewards_as_of(DATE) CASCADE;
 		DROP FUNCTION IF EXISTS reward_corporate_action_outcome(INTEGER, DATE) CASCADE;
 		DROP FUNCTION IF EXISTS backfill_price_history(DATE) CASCADE;

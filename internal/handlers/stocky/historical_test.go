@@ -62,6 +62,31 @@ func TestGetHistoricalINR_InvalidAsOf(t *testing.T) {
 	}
 }
 
+func historicalSummaryColumns() []string {
+	return []string{
+		"reward_date",
+		"reward_event_id",
+		"stock_symbol",
+		"adjusted_quantity",
+		"price",
+		"total_adjustment_amount",
+		"inr_value",
+		"price_status",
+		"price_as_of",
+		"outcome_type",
+		"is_active",
+		"delist_effective_date",
+		"cash_proceeds",
+		"written_off_quantity",
+		"price_source",
+		"price_fetched_at",
+		"valuation_date",
+		"as_of_allowed",
+		"unpriced_rewards",
+		"unpriced_symbols",
+	}
+}
+
 func TestGetHistoricalINR_RejectsFutureAsOf(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -76,12 +101,12 @@ func TestGetHistoricalINR_RejectsFutureAsOf(t *testing.T) {
 	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
 
 	tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	tomorrowTime, _ := time.Parse("2006-01-02", tomorrow)
 
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT $1::date <= market_today()")).
-		WithArgs(tomorrow).
-		WillReturnRows(sqlmock.NewRows([]string{"allowed"}).AddRow(false))
-	mock.ExpectRollback()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_for_user")).
+		WithArgs(1, tomorrow, 100, 0).
+		WillReturnRows(sqlmock.NewRows(historicalSummaryColumns()).
+			AddRow(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, tomorrowTime, false, 0, "{}"))
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1?asOf="+tomorrow, nil)
 
@@ -109,37 +134,24 @@ func TestGetHistoricalINR_ReturnsMissingHistoricalPrice(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
 
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_as_of")).
+	valuationDate := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows(historicalSummaryColumns()).
+		AddRow(
+			time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC), 2, "TCS", 10.0, 3500.0, 0.0, 35000.0,
+			"available", time.Date(2026, 10, 27, 18, 30, 0, 0, time.FixedZone("IST", 5*3600+1800)),
+			"active", true, nil, 0.0, 0.0, "nse_bhavcopy",
+			time.Date(2026, 10, 27, 13, 5, 0, 0, time.UTC),
+			valuationDate, true, 1, "{NEWCO}",
+		).
+		AddRow(
+			time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC), 1, "NEWCO", 5.0, nil, 0.0, nil,
+			"missing", nil, "active", true, nil, 0.0, 0.0, nil, nil,
+			valuationDate, true, 1, "{NEWCO}",
+		)
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_for_user")).
 		WithArgs(1, nil, 100, 0).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"reward_date",
-			"reward_event_id",
-			"stock_symbol",
-			"adjusted_quantity",
-			"price",
-			"total_adjustment_amount",
-			"inr_value",
-			"price_status",
-			"price_as_of",
-			"price_source",
-			"price_fetched_at",
-			"outcome_type",
-			"is_active",
-			"delist_effective_date",
-			"cash_proceeds",
-			"written_off_quantity",
-		}).
-			AddRow("2026-10-27", 2, "TCS", 10.0, 3500.0, 0.0, 35000.0, "available", time.Date(2026, 10, 27, 18, 30, 0, 0, time.FixedZone("IST", 5*3600+1800)), "nse_bhavcopy", time.Date(2026, 10, 27, 13, 5, 0, 0, time.UTC), "active", true, nil, 0.0, 0.0).
-			AddRow("2026-10-26", 1, "NEWCO", 5.0, nil, 0.0, nil, "missing", nil, nil, nil, "active", true, nil, 0.0, 0.0))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT market_today()::TEXT")).
-		WillReturnRows(sqlmock.NewRows([]string{"market_today"}).AddRow("2026-10-28"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("AND price_status = 'missing'")).
-		WithArgs(1, nil).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}).AddRow("NEWCO"))
-	mock.ExpectCommit()
+		WillReturnRows(rows)
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1", nil)
 	w := httptest.NewRecorder()
@@ -252,38 +264,23 @@ func TestGetHistoricalINR_AsOfKeepsDelistedReward(t *testing.T) {
 	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
 
 	asOf := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	asOfTime, _ := time.Parse("2006-01-02", asOf)
 
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT $1::date <= market_today()")).
-		WithArgs(asOf).
-		WillReturnRows(sqlmock.NewRows([]string{"allowed"}).AddRow(true))
-	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_as_of")).
+	rows := sqlmock.NewRows(historicalSummaryColumns()).
+		AddRow(
+			time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC), 5, "OLDCO", 0.0, nil, 0.0, 0.0,
+			"not_required", nil, "write_off", false, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC),
+			0.0, 100.0, nil, nil, asOfTime, true, 0, "{}",
+		).
+		AddRow(
+			time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC), 6, "CASHCO", 0.0, nil, 0.0, 0.0,
+			"not_required", nil, "cash_exit", false, time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC),
+			5000.0, 0.0, nil, nil, asOfTime, true, 0, "{}",
+		)
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_for_user")).
 		WithArgs(1, asOf, 100, 0).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"reward_date",
-			"reward_event_id",
-			"stock_symbol",
-			"adjusted_quantity",
-			"price",
-			"total_adjustment_amount",
-			"inr_value",
-			"price_status",
-			"price_as_of",
-			"price_source",
-			"price_fetched_at",
-			"outcome_type",
-			"is_active",
-			"delist_effective_date",
-			"cash_proceeds",
-			"written_off_quantity",
-		}).
-			AddRow("2026-09-15", 5, "OLDCO", 0.0, nil, 0.0, 0.0, "not_required", nil, nil, nil, "write_off", false, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC), 0.0, 100.0).
-			AddRow("2026-09-10", 6, "CASHCO", 0.0, nil, 0.0, 0.0, "not_required", nil, nil, nil, "cash_exit", false, time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC), 5000.0, 0.0))
-
-	mock.ExpectQuery(regexp.QuoteMeta("AND price_status = 'missing'")).
-		WithArgs(1, asOf).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}))
-	mock.ExpectCommit()
+		WillReturnRows(rows)
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1?asOf="+asOf, nil)
 	w := httptest.NewRecorder()
@@ -355,6 +352,60 @@ func TestGetHistoricalINR_AsOfKeepsDelistedReward(t *testing.T) {
 	}
 	if cashExit["cashProceeds"] != 5000.0 {
 		t.Errorf("expected cashProceeds 5000, got %v", cashExit["cashProceeds"])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("there were unfulfilled expectations: %v", err)
+	}
+}
+
+func TestGetHistoricalINR_EmptyPageStillReturnsSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to open sqlmock database: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewHandler(db)
+	router := gin.New()
+	router.GET("/api/v1/historical-inr/:userId", handler.GetHistoricalINR)
+
+	valuationDate := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("FROM historical_rewards_for_user")).
+		WithArgs(1, nil, 100, 100).
+		WillReturnRows(sqlmock.NewRows(historicalSummaryColumns()).
+			AddRow(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, valuationDate, true, 2, "{NEWCO,OLDCO}"))
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/historical-inr/1?limit=100&offset=100", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty historical page, got %d", w.Code)
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body["valuationDate"] != "2026-10-28" {
+		t.Errorf("expected valuationDate 2026-10-28, got %v", body["valuationDate"])
+	}
+	if body["valuationComplete"] != false {
+		t.Errorf("expected valuationComplete false from the full set, got %v", body["valuationComplete"])
+	}
+	if body["unpricedRewards"] != 2.0 {
+		t.Errorf("expected full-set unpricedRewards 2, got %v", body["unpricedRewards"])
+	}
+	symbols, ok := body["unpricedSymbols"].([]interface{})
+	if !ok || len(symbols) != 2 || symbols[0] != "NEWCO" || symbols[1] != "OLDCO" {
+		t.Errorf("expected full-set unpricedSymbols [NEWCO OLDCO], got %v", body["unpricedSymbols"])
+	}
+	history, ok := body["history"].([]interface{})
+	if !ok || len(history) != 0 {
+		t.Errorf("expected an empty history page, got %v", body["history"])
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

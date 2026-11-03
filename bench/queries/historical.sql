@@ -15,19 +15,23 @@ SELECT
     inr_value,
     price_status,
     price_as_of,
-    price_source,
-    price_fetched_at,
     outcome_type,
     is_active,
     delist_effective_date,
     cash_proceeds,
-    written_off_quantity
-FROM historical_rewards_as_of(NULL::date)
-WHERE user_id = :user_id
-  AND reward_date <= market_today() - 1
-ORDER BY reward_date DESC, reward_event_id DESC
-LIMIT :page_limit
-OFFSET :page_offset;
+    written_off_quantity,
+    price_source,
+    price_fetched_at,
+    valuation_date,
+    as_of_allowed,
+    unpriced_rewards,
+    unpriced_symbols
+FROM historical_rewards_for_user(
+    :user_id,
+    NULL::date,
+    :page_limit,
+    :page_offset
+);
 
 \echo '--- historical as-of mode (30 days ago) ---'
 EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
@@ -41,16 +45,20 @@ SELECT
     inr_value,
     price_status,
     price_as_of,
-    price_source,
-    price_fetched_at,
     outcome_type,
     is_active,
     delist_effective_date,
     cash_proceeds,
-    written_off_quantity
-FROM historical_rewards_as_of((market_today() - 30)::date)
-WHERE user_id = :user_id
-  AND reward_date <= market_today() - 30
-ORDER BY reward_date DESC, reward_event_id DESC
-LIMIT :page_limit
-OFFSET :page_offset;
+    written_off_quantity,
+    price_source,
+    price_fetched_at,
+    valuation_date,
+    as_of_allowed,
+    unpriced_rewards,
+    unpriced_symbols
+FROM historical_rewards_for_user(
+    :user_id,
+    (market_today() - 30)::date,
+    :page_limit,
+    :page_offset
+);

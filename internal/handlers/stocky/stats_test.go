@@ -50,41 +50,27 @@ func TestStatsHandler_ReturnsPortfolioAndCashOutcome(t *testing.T) {
 	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM reward_state rs")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"adjusted_quantity",
 		}).AddRow("B", 200.0))
 
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
-			"valuation_date",
-		}).AddRow(10000.0, 1, "2026-10-28"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"price_status",
 			"price_as_of",
 			"price_source",
-		}).AddRow("B", "available", time.Now(), "yahoo"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}))
-
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
+			"current_price",
+			"inr_value",
 			"cash_proceeds",
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
-		}).AddRow(1000.0, 25.0, 250.0))
+			"valuation_date",
+		}).AddRow("B", "available", time.Now(), "yahoo", 50.0, 10000.0, 1000.0, 25.0, 250.0, "2026-10-28"))
 	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)
@@ -143,43 +129,29 @@ func TestStatsHandler_MarksIncompleteValuationForMissingPrice(t *testing.T) {
 	router.GET("/api/v1/stats/:userId", handler.StatsHandler)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM reward_state rs")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"adjusted_quantity",
 		}).AddRow("NEWCO", 10.0))
 
-	mock.ExpectQuery(regexp.QuoteMeta("COUNT(*)")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"total_portfolio_value",
-			"total_positions",
-			"valuation_date",
-		}).AddRow(5000.0, 2, "2026-10-28"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT stock_symbol, price_status, price_as_of, price_source")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM (SELECT 1) AS anchor")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"stock_symbol",
 			"price_status",
 			"price_as_of",
 			"price_source",
-		}).
-			AddRow("B", "available", time.Now(), "yahoo").
-			AddRow("NEWCO", "missing", nil, nil))
-
-	mock.ExpectQuery(regexp.QuoteMeta("AND current_price IS NULL")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"stock_symbol"}).AddRow("NEWCO"))
-
-	mock.ExpectQuery(regexp.QuoteMeta("FROM user_corporate_action_cash")).
-		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{
+			"current_price",
+			"inr_value",
 			"cash_proceeds",
 			"written_off_quantity",
 			"cash_in_lieu_proceeds",
-		}).AddRow(0.0, 0.0, 0.0))
+			"valuation_date",
+		}).
+			AddRow("B", "available", time.Now(), "yahoo", 50.0, 5000.0, 0.0, 0.0, 0.0, "2026-10-28").
+			AddRow("NEWCO", "missing", nil, nil, nil, nil, 0.0, 0.0, 0.0, "2026-10-28"))
 	mock.ExpectCommit()
 
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/stats/1", nil)

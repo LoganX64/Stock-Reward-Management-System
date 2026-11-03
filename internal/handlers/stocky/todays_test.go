@@ -49,7 +49,7 @@ func TestGetTodayStocks_ReturnsMissingPriceReward(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/today-stocks/:userId", handler.GetTodayStocks)
 
-	mock.ExpectQuery(regexp.QuoteMeta("FROM today_rewards")).
+	mock.ExpectQuery(regexp.QuoteMeta("FROM reward_state rs")).
 		WithArgs(1).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"reward_event_id",

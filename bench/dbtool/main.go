@@ -386,7 +386,7 @@ func explain(dbConfig config.Database, dir, outPath string, userID, limit, offse
 	defer db.Close()
 
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "Stocky Phase 0 query plans\nDatabase: %s\n", dbConfig.DBName)
+	fmt.Fprintf(&builder, "Stocky query plans\nDatabase: %s\n", dbConfig.DBName)
 
 	var failures []string
 	for _, file := range files {

@@ -10,6 +10,7 @@ import (
 	"github.com/LoganX64/stocky-api/internal/utils"
 	"github.com/LoganX64/stocky-api/internal/utils/response"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
@@ -51,36 +52,18 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	tx, err := h.beginReadSnapshot(c.Request.Context())
-	if err != nil {
-		logger.WithError(err).Error("Failed to start historical read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-	defer tx.Rollback()
-
 	var asOfArg any
 	valuationMode := "grant_date"
 	if asOf != nil {
-		// "Future" is a market-date question, so it must be checked against the
-		// same market clock the views use rather than the application's UTC
-		// date. Doing it inside the snapshot also keeps the check consistent
-		// with every row read for this response.
-		var asOfAllowed bool
-		if err := tx.QueryRow(`SELECT $1::date <= market_today()`, *asOf).Scan(&asOfAllowed); err != nil {
-			logger.WithError(err).Error("Failed to validate asOf")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-			return
-		}
-		if !asOfAllowed {
-			response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("asOf cannot be in the future"))
-			return
-		}
 		asOfArg = *asOf
 		valuationMode = "as_of"
 	}
 
-	rows, err := tx.Query(`
+	// One statement returns the requested page plus the full-set unpriced
+	// summary. The function applies the user and date filters before any
+	// lifecycle work, so the page is bounded even when the user has a long
+	// history. A summary-only row is returned when the page is empty.
+	rows, err := h.DB.Query(`
 		SELECT
 			reward_date,
 			reward_event_id,
@@ -91,64 +74,104 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			inr_value,
 			price_status,
 			price_as_of,
-			price_source,
-			price_fetched_at,
 			outcome_type,
 			is_active,
 			delist_effective_date,
 			cash_proceeds,
-			written_off_quantity
-		FROM historical_rewards_as_of($2::date)
-		WHERE user_id = $1
-		  AND reward_date <= COALESCE($2::date, market_today() - 1)
-		ORDER BY reward_date DESC, reward_event_id DESC
-		LIMIT $3 OFFSET $4
+			written_off_quantity,
+			price_source,
+			price_fetched_at,
+			valuation_date,
+			as_of_allowed,
+			unpriced_rewards,
+			unpriced_symbols
+		FROM historical_rewards_for_user($1, $2::date, $3, $4)
 	`, userID, asOfArg, limit, offset)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch historical INR")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
+	defer rows.Close()
 
 	var history []models.HistoricalINR
+	var (
+		valuationDate   time.Time
+		asOfAllowed     bool
+		unpricedRewards int64
+		unpricedSymbols pq.StringArray
+		sawSummary      bool
+	)
+
 	for rows.Next() {
-		var rec models.HistoricalINR
-		var price decimal.NullDecimal
-		var inrValue decimal.NullDecimal
-		var priceAsOf sql.NullTime
-		var priceSource sql.NullString
-		var priceFetchedAt sql.NullTime
-		var delistEffectiveDate sql.NullTime
+		var (
+			rewardDate            sql.NullTime
+			rewardEventID         sql.NullInt64
+			stockSymbol           sql.NullString
+			adjustedQuantity      decimal.NullDecimal
+			price                 decimal.NullDecimal
+			totalAdjustmentAmount decimal.NullDecimal
+			inrValue              decimal.NullDecimal
+			priceStatus           sql.NullString
+			priceAsOf             sql.NullTime
+			outcomeType           sql.NullString
+			isActive              sql.NullBool
+			delistEffectiveDate   sql.NullTime
+			cashProceeds          decimal.NullDecimal
+			writtenOffQuantity    decimal.NullDecimal
+			priceSource           sql.NullString
+			priceFetchedAt        sql.NullTime
+		)
+
 		if err := rows.Scan(
-			&rec.RewardDate,
-			&rec.RewardEventID,
-			&rec.StockSymbol,
-			&rec.AdjustedQuantity,
+			&rewardDate,
+			&rewardEventID,
+			&stockSymbol,
+			&adjustedQuantity,
 			&price,
-			&rec.TotalAdjustmentAmount,
+			&totalAdjustmentAmount,
 			&inrValue,
-			&rec.PriceStatus,
+			&priceStatus,
 			&priceAsOf,
+			&outcomeType,
+			&isActive,
+			&delistEffectiveDate,
+			&cashProceeds,
+			&writtenOffQuantity,
 			&priceSource,
 			&priceFetchedAt,
-			&rec.OutcomeType,
-			&rec.IsActive,
-			&delistEffectiveDate,
-			&rec.CashProceeds,
-			&rec.WrittenOffQuantity,
+			&valuationDate,
+			&asOfAllowed,
+			&unpricedRewards,
+			&unpricedSymbols,
 		); err != nil {
-			rows.Close()
 			logger.WithError(err).Error("Failed to scan historical INR record")
 			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 			return
 		}
+		sawSummary = true
+
+		// The summary-only row has no reward fields; it exists so an empty
+		// page still reports valuation completeness.
+		if !rewardEventID.Valid {
+			continue
+		}
+
+		rec := models.HistoricalINR{
+			RewardDate:            rewardDate.Time.Format("2006-01-02"),
+			RewardEventID:         int(rewardEventID.Int64),
+			StockSymbol:           stockSymbol.String,
+			AdjustedQuantity:      utils.RoundQuantity(adjustedQuantity.Decimal),
+			TotalAdjustmentAmount: utils.RoundAmount(totalAdjustmentAmount.Decimal),
+			PriceStatus:           priceStatus.String,
+			OutcomeType:           outcomeType.String,
+			IsActive:              isActive.Bool,
+			CashProceeds:          utils.RoundAmount(cashProceeds.Decimal),
+			WrittenOffQuantity:    utils.RoundQuantity(writtenOffQuantity.Decimal),
+		}
 
 		// Apply consistent rounding to available values and preserve NULL for
 		// missing prices. A zero-quantity row reports not_required and no price.
-		rec.AdjustedQuantity = utils.RoundQuantity(rec.AdjustedQuantity)
-		rec.TotalAdjustmentAmount = utils.RoundAmount(rec.TotalAdjustmentAmount)
-		rec.CashProceeds = utils.RoundAmount(rec.CashProceeds)
-		rec.WrittenOffQuantity = utils.RoundQuantity(rec.WrittenOffQuantity)
 		if price.Valid {
 			rec.Price = decimal.NullDecimal{Decimal: utils.RoundAmount(price.Decimal), Valid: true}
 		}
@@ -174,41 +197,18 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 
 		history = append(history, rec)
 	}
-
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		logger.WithError(err).Error("Error iterating historical INR rows")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-	if err := rows.Close(); err != nil {
-		logger.WithError(err).Error("Failed to close historical INR rows")
+	if !sawSummary {
+		logger.Error("Historical INR query returned no summary row")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
-
-	valuationDate := ""
-	if asOf != nil {
-		valuationDate = *asOf
-	} else {
-		valuationDate, err = h.getMarketToday(tx)
-		if err != nil {
-			logger.WithError(err).Error("Failed to fetch valuation date")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-			return
-		}
-	}
-
-	unpricedRewards, unpricedSymbols, err := h.getUnpricedHistoricalRewards(tx, userID, asOf)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch unpriced historical rewards")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		logger.WithError(err).Error("Failed to commit historical read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+	if !asOfAllowed {
+		response.WriteJson(c.Writer, http.StatusBadRequest, response.ErrorResponse("asOf cannot be in the future"))
 		return
 	}
 
@@ -217,11 +217,11 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		"limit":             limit,
 		"offset":            offset,
 		"valuationMode":     valuationMode,
-		"valuationDate":     valuationDate,
+		"valuationDate":     valuationDate.Format("2006-01-02"),
 		"asOf":              asOf,
 		"history":           utils.OrEmpty(history),
 		"valuationComplete": unpricedRewards == 0,
-		"unpricedRewards":   unpricedRewards,
-		"unpricedSymbols":   utils.OrEmpty(unpricedSymbols),
+		"unpricedRewards":   int(unpricedRewards),
+		"unpricedSymbols":   utils.OrEmpty([]string(unpricedSymbols)),
 	})
 }

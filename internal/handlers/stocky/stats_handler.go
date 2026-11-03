@@ -32,9 +32,11 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 	defer tx.Rollback()
 
 	rows, err := tx.Query(`
-		SELECT stock_symbol, adjusted_quantity
-		FROM today_rewards
-		WHERE user_id = $1
+		SELECT rs.terminal_symbol, rs.adjusted_quantity::NUMERIC
+		FROM reward_state rs
+		WHERE rs.user_id = $1
+		  AND rs.reward_date = market_today()
+		  AND rs.is_active
 	`, userID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch today rewards")
@@ -68,30 +70,9 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
-	totalPortfolioValue, totalPositions, valuationDate, err := h.getPortfolioTotals(tx, userID)
+	summary, err := h.getPortfolioSummary(tx, userID)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch total portfolio value")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
-	freshness, err := h.getPortfolioFreshness(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio freshness")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
-	unpricedSymbols, err := h.getUnpricedPortfolioSymbols(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch unpriced portfolio symbols")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
-		return
-	}
-
-	cashProceeds, writtenOffQuantity, cashInLieuProceeds, err := h.getUserCorporateActionCash(tx, userID)
-	if err != nil {
-		logger.WithError(err).Error("Failed to fetch corporate action cash outcomes")
+		logger.WithError(err).Error("Failed to fetch portfolio summary")
 		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
 		return
 	}
@@ -105,17 +86,17 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 	response.WriteJson(c.Writer, http.StatusOK, map[string]interface{}{
 		"userId":              userID,
 		"todayRewards":        utils.OrEmpty(todayRewards),
-		"totalPortfolioValue": utils.RoundAmount(totalPortfolioValue),
-		"totalPositions":      totalPositions,
-		"valuationDate":       valuationDate,
-		"valuationComplete":   len(unpricedSymbols) == 0,
-		"unpricedPositions":   len(unpricedSymbols),
-		"unpricedSymbols":     utils.OrEmpty(unpricedSymbols),
-		"stalePositions":      freshness.StalePositions,
-		"staleSymbols":        utils.OrEmpty(freshness.StaleSymbols),
-		"pricesFresh":         freshness.PricesFresh,
-		"cashProceeds":        utils.RoundAmount(cashProceeds),
-		"cashInLieuProceeds":  utils.RoundAmount(cashInLieuProceeds),
-		"writtenOffQuantity":  utils.RoundQuantity(writtenOffQuantity),
+		"totalPortfolioValue": utils.RoundAmount(summary.TotalPortfolioValue),
+		"totalPositions":      summary.TotalPositions,
+		"valuationDate":       summary.ValuationDate,
+		"valuationComplete":   len(summary.UnpricedSymbols) == 0,
+		"unpricedPositions":   len(summary.UnpricedSymbols),
+		"unpricedSymbols":     utils.OrEmpty(summary.UnpricedSymbols),
+		"stalePositions":      summary.StalePositions,
+		"staleSymbols":        utils.OrEmpty(summary.StaleSymbols),
+		"pricesFresh":         summary.PricesFresh,
+		"cashProceeds":        utils.RoundAmount(summary.CashProceeds),
+		"cashInLieuProceeds":  utils.RoundAmount(summary.CashInLieuProceeds),
+		"writtenOffQuantity":  utils.RoundQuantity(summary.WrittenOffQuantity),
 	})
 }
