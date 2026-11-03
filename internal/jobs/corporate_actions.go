@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LoganX64/stocky-api/internal/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -20,6 +21,7 @@ type CorporateActionService struct {
 	db       DB
 	interval time.Duration
 	timeout  time.Duration
+	metrics  *metrics.Metrics
 	started  int32
 }
 
@@ -27,6 +29,7 @@ type CorporateActionService struct {
 type CorporateActionServiceOptions struct {
 	Interval time.Duration
 	Timeout  time.Duration
+	Metrics  *metrics.Metrics
 }
 
 // NewCorporateActionService creates a service that runs every 15 minutes. The
@@ -54,6 +57,7 @@ func NewCorporateActionServiceWithOptions(db DB, opts *CorporateActionServiceOpt
 		db:       db,
 		interval: options.Interval,
 		timeout:  options.Timeout,
+		metrics:  options.Metrics,
 	}
 }
 
@@ -90,22 +94,32 @@ func (s *CorporateActionService) process(ctx context.Context) {
 	// state is refreshed, and the cash ledger is part of the base state. The
 	// *_if_due wrappers do the expensive work at most once per market date and
 	// serialise multiple API instances with advisory locks.
-	s.runCount(ctx, "corporate action cash", "postings", `
+	ok := true
+	if err := s.runCount(ctx, "corporate action cash", "postings", `
 		SELECT process_corporate_action_cash_if_due(market_today())
-	`)
-	s.runCount(ctx, "instrument factors", "symbols", `
+	`); err != nil {
+		ok = false
+	}
+	if err := s.runCount(ctx, "instrument factors", "symbols", `
 		SELECT refresh_instrument_factors_if_due(market_today())
-	`)
-	s.runCount(ctx, "effective corporate actions", "rewards", `
+	`); err != nil {
+		ok = false
+	}
+	if err := s.runCount(ctx, "effective corporate actions", "rewards", `
 		SELECT refresh_effective_corporate_actions_if_due(market_today())
-	`)
+	`); err != nil {
+		ok = false
+	}
+	if ok {
+		s.metrics.MarkJobSuccess("corporate_actions", time.Now())
+	}
 }
 
-func (s *CorporateActionService) runCount(ctx context.Context, label, field, query string) {
+func (s *CorporateActionService) runCount(ctx context.Context, label, field, query string) error {
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		logrus.WithError(err).Errorf("%s refresh failed", label)
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -113,13 +127,14 @@ func (s *CorporateActionService) runCount(ctx context.Context, label, field, que
 	if rows.Next() {
 		if err := rows.Scan(&count); err != nil {
 			logrus.WithError(err).Errorf("Failed to read %s result", label)
-			return
+			return err
 		}
 	}
 	if err := rows.Err(); err != nil {
 		logrus.WithError(err).Errorf("%s refresh failed", label)
-		return
+		return err
 	}
 
 	logrus.WithField(field, count).Debugf("%s refresh completed", label)
+	return nil
 }

@@ -259,6 +259,11 @@ func run(opts options) error {
 		fmt.Printf("warning: pg_stat_statements unavailable: %v\n", err)
 	}
 
+	fmt.Println("capturing API metrics...")
+	if err := captureMetrics(baseURL, filepath.Join(resultDir, "api-metrics.txt")); err != nil {
+		fmt.Printf("warning: could not capture /metrics: %v\n", err)
+	}
+
 	runInfo := fmt.Sprintf(
 		"database=%s\nhost=%s\nport=%d\nusers=%d\nquick=%t\nonly_peak=%t\nload_skipped=%t\nstarted=%s\n",
 		opts.database, baseURL, opts.port, opts.users, opts.quick, opts.onlyPeak, opts.skipLoad,
@@ -273,6 +278,25 @@ func run(opts options) error {
 		fmt.Print(string(summary))
 	}
 	return nil
+}
+
+func captureMetrics(baseURL, path string) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(baseURL + "/metrics")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET /metrics: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o644)
 }
 
 func build(repoRoot, output, pkg string) error {

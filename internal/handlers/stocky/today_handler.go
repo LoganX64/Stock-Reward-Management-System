@@ -3,6 +3,7 @@ package stocky
 import (
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
 	"github.com/LoganX64/stocky-api/internal/utils"
@@ -22,7 +23,8 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 		"user_id":    userID,
 	})
 
-	rows, err := h.DB.Query(`
+	started := time.Now()
+	rows, err := h.readDB().QueryContext(c.Request.Context(), `
 		SELECT
 			rs.reward_id AS reward_event_id,
 			rs.terminal_symbol AS stock_symbol,
@@ -48,10 +50,10 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 		  AND rs.is_active
 		ORDER BY rs.terminal_symbol, rs.reward_id
 	`, userID)
+	h.Metrics.ObserveQuery("today", started, err)
 
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch today stocks")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to fetch today stocks", "internal server error", err)
 		return
 	}
 	defer rows.Close()
@@ -79,8 +81,7 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 			&priceSource,
 			&priceFetchedAt,
 		); err != nil {
-			logger.WithError(err).Error("scan error")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			writeReadError(c, logger, "scan error", "internal server error", err)
 			return
 		}
 
@@ -115,8 +116,7 @@ func (h *Handler) GetTodayStocks(c *gin.Context) {
 		stocks = append(stocks, s)
 	}
 	if err := rows.Err(); err != nil {
-		logger.WithError(err).Error("Error iterating today stocks rows")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Error iterating today stocks rows", "internal server error", err)
 		return
 	}
 

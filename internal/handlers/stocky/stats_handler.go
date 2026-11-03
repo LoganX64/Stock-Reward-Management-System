@@ -2,6 +2,7 @@ package stocky
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
 	"github.com/LoganX64/stocky-api/internal/utils"
@@ -25,22 +26,22 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 	// valuation date and snapshot as each other.
 	tx, err := h.beginReadSnapshot(c.Request.Context())
 	if err != nil {
-		logger.WithError(err).Error("Failed to start stats read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to start stats read snapshot", "internal server error", err)
 		return
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query(`
+	started := time.Now()
+	rows, err := tx.QueryContext(c.Request.Context(), `
 		SELECT rs.terminal_symbol, rs.adjusted_quantity::NUMERIC
 		FROM reward_state rs
 		WHERE rs.user_id = $1
 		  AND rs.reward_date = market_today()
 		  AND rs.is_active
 	`, userID)
+	h.Metrics.ObserveQuery("stats_today", started, err)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch today rewards")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to fetch today rewards", "internal server error", err)
 		return
 	}
 
@@ -49,8 +50,7 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		var tr models.TodayReward
 		if err := rows.Scan(&tr.StockSymbol, &tr.TotalQuantity); err != nil {
 			rows.Close()
-			logger.WithError(err).Error("Failed to scan today reward")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			writeReadError(c, logger, "Failed to scan today reward", "internal server error", err)
 			return
 		}
 
@@ -60,8 +60,7 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		logger.WithError(err).Error("Error iterating today rewards rows")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Error iterating today rewards rows", "internal server error", err)
 		return
 	}
 	if err := rows.Close(); err != nil {
@@ -70,16 +69,14 @@ func (h *Handler) StatsHandler(c *gin.Context) {
 		return
 	}
 
-	summary, err := h.getPortfolioSummary(tx, userID)
+	summary, err := h.getPortfolioSummary(c.Request.Context(), tx, userID)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio summary")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to fetch portfolio summary", "internal server error", err)
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		logger.WithError(err).Error("Failed to commit stats read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to commit stats read snapshot", "internal server error", err)
 		return
 	}
 

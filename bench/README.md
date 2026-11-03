@@ -79,7 +79,8 @@ go build -o .\bench\bin\phase0.exe .\bench\phase0
 5. Rebuilds the read projections with `rebuild-projections --online`.
 6. Captures `EXPLAIN (ANALYZE, BUFFERS)` plans.
 7. Runs the warm-up, steady, and peak load phases.
-8. Captures database settings, connection states, and `pg_stat_statements`.
+8. Captures database settings, connection states, `pg_stat_statements`, and
+   the API's Prometheus `/metrics` output.
 9. Stops the API.
 
 ### Useful options
@@ -356,9 +357,21 @@ bench/results/phase0-YYYYMMDD-HHMMSS/
   database-settings.txt      # server version, shared_buffers, etc.
   pg-stat-statements.txt     # top queries by total execution time
   db-activity.txt            # connection states after the run
+  api-metrics.txt            # Prometheus /metrics output after the load
   run-info.txt               # run parameters
   api.out.log / api.err.log  # API logs
 ```
+
+`api-metrics.txt` is captured after the load phases. It contains the HTTP
+latency histograms, named-query timings, DB pool gauges/counters, and projection
+health gauges. A missing file is a warning, not a failed run; set
+`METRICS_ENABLED=true` (the default) to capture it.
+
+To tune the pool, compare `stocky_db_pool_wait_count_total` and
+`stocky_db_pool_wait_duration_seconds_total` with the p95/p99 latency in
+`summary.txt`. A non-zero wait count with rising p99 means the pool is too small
+or the database is saturated. Check PostgreSQL CPU and `max_connections` before
+raising `DB_MAX_OPEN_CONNS`.
 
 ## Reading the baseline
 
@@ -385,3 +398,5 @@ The harness only measures. Phase 1 added the projection schema and rebuild step
 used above. Phase 2 added the queue, rollover due checks, reconciliation, and the
 two write-path checks. Phase 3 replaced the read-path SQL and the query set used
 for plan capture; the handler and integration tests live outside this directory.
+Phase 4 added the API/jobs pool split, request deadlines, optional read-replica
+routing, and the `api-metrics.txt` capture.

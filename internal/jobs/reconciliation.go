@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LoganX64/stocky-api/internal/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -34,6 +35,7 @@ type ReconciliationService struct {
 	timeout       time.Duration
 	alerter       Alerter
 	limiter       *alertLimiter
+	metrics       *metrics.Metrics
 	started       int32
 }
 
@@ -47,6 +49,7 @@ type ReconciliationServiceOptions struct {
 	Timeout       time.Duration
 	AlertCooldown time.Duration
 	Alerter       Alerter
+	Metrics       *metrics.Metrics
 }
 
 func NewReconciliationService(db DB) *ReconciliationService {
@@ -96,6 +99,7 @@ func NewReconciliationServiceWithOptions(db DB, opts *ReconciliationServiceOptio
 		timeout:       options.Timeout,
 		alerter:       options.Alerter,
 		limiter:       newAlertLimiter(options.AlertCooldown),
+		metrics:       options.Metrics,
 	}
 }
 
@@ -146,6 +150,9 @@ func (s *ReconciliationService) process(ctx context.Context) {
 		"mismatch_count": mismatchCount,
 		"duration_ms":    time.Since(started).Milliseconds(),
 	}
+
+	s.metrics.ObserveReconciliation(usersChecked, mismatchCount, time.Since(started))
+	s.metrics.MarkJobSuccess("reconciliation", time.Now())
 
 	if mismatchCount == 0 {
 		logrus.WithFields(fields).Info("Projection reconciliation found no drift")

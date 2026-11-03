@@ -6,12 +6,20 @@ import (
 	"time"
 
 	"github.com/LoganX64/stocky-api/internal/marketcal"
+	"github.com/LoganX64/stocky-api/internal/metrics"
 	"github.com/shopspring/decimal"
 )
 
 // Handler holds all dependencies (mainly DB)
 type Handler struct {
 	DB *sql.DB
+
+	// ReadDB is an optional read-replica pool. When nil, reads use DB, which
+	// preserves read-your-writes for single-database deployments.
+	ReadDB *sql.DB
+
+	// Metrics is optional so tests and small deployments can omit it.
+	Metrics *metrics.Metrics
 
 	// Calendar and Freshness drive the calendar-aware staleness reported for
 	// current prices. They default to the NSE calendar and the shared A3
@@ -53,6 +61,25 @@ func WithClock(now func() time.Time) Option {
 	return func(h *Handler) {
 		if now != nil {
 			h.Now = now
+		}
+	}
+}
+
+// WithReadDB routes reporting reads through a read replica. Writes always stay
+// on the primary DB.
+func WithReadDB(db *sql.DB) Option {
+	return func(h *Handler) {
+		if db != nil {
+			h.ReadDB = db
+		}
+	}
+}
+
+// WithMetrics attaches DB and projection metrics to the handler.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(h *Handler) {
+		if m != nil {
+			h.Metrics = m
 		}
 	}
 }
@@ -153,17 +180,26 @@ type portfolioSummary struct {
 
 // dbReader is implemented by both *sql.DB and *sql.Tx. Reporting helpers use it
 // so they can run inside the same read-only snapshot transaction as their
-// handler.
+// handler. Context-aware methods make request deadlines reach PostgreSQL.
 type dbReader interface {
-	Query(query string, args ...any) (*sql.Rows, error)
-	QueryRow(query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readDB returns the configured read replica, or the primary pool when no
+// replica is configured.
+func (h *Handler) readDB() *sql.DB {
+	if h.ReadDB != nil {
+		return h.ReadDB
+	}
+	return h.DB
 }
 
 // beginReadSnapshot starts a read-only repeatable-read transaction. Every read
 // in a reporting response then shares one MVCC snapshot and one market date,
 // which keeps position sets and totals consistent.
 func (h *Handler) beginReadSnapshot(ctx context.Context) (*sql.Tx, error) {
-	return h.DB.BeginTx(ctx, &sql.TxOptions{
+	return h.readDB().BeginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  true,
 	})
@@ -173,8 +209,9 @@ func (h *Handler) beginReadSnapshot(ctx context.Context) (*sql.Tx, error) {
 // aggregates full-set totals, valuation gaps, freshness, and corporate-action
 // cash. The anchor row guarantees a result even for a user with no portfolio or
 // cash position, so valuationDate is always available.
-func (h *Handler) getPortfolioSummary(q dbReader, userID int) (portfolioSummary, error) {
-	rows, err := q.Query(`
+func (h *Handler) getPortfolioSummary(ctx context.Context, q dbReader, userID int) (portfolioSummary, error) {
+	started := time.Now()
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 			p.stock_symbol,
 			p.price_status,
@@ -193,6 +230,7 @@ func (h *Handler) getPortfolioSummary(q dbReader, userID int) (portfolioSummary,
 			ON c.user_id = $1
 		ORDER BY p.stock_symbol
 	`, userID)
+	h.Metrics.ObserveQuery("portfolio_summary", started, err)
 	if err != nil {
 		return portfolioSummary{}, err
 	}

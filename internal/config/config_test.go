@@ -116,6 +116,144 @@ func TestLoadProjectionRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestLoadHTTPServerDefaults(t *testing.T) {
+	h, err := loadHTTPServer(envValues(nil))
+	if err != nil {
+		t.Fatalf("loadHTTPServer() error = %v", err)
+	}
+	if h.Port != ":8080" {
+		t.Errorf("Port = %q, want :8080", h.Port)
+	}
+	if h.RequestTimeout != 10*time.Second {
+		t.Errorf("RequestTimeout = %s, want 10s", h.RequestTimeout)
+	}
+	if !h.MetricsEnabled {
+		t.Error("MetricsEnabled = false, want true")
+	}
+}
+
+func TestLoadHTTPServerOverrides(t *testing.T) {
+	h, err := loadHTTPServer(envValues(map[string]string{
+		"HTTP_PORT":            "9090",
+		"HTTP_REQUEST_TIMEOUT": "5s",
+		"METRICS_ENABLED":      "false",
+	}))
+	if err != nil {
+		t.Fatalf("loadHTTPServer() error = %v", err)
+	}
+	if h.Port != ":9090" || h.RequestTimeout != 5*time.Second || h.MetricsEnabled {
+		t.Errorf("loadHTTPServer() = %+v, want :9090/5s/false", h)
+	}
+}
+
+func TestLoadHTTPServerRejectsInvalidValues(t *testing.T) {
+	cases := map[string]map[string]string{
+		"request timeout": {"HTTP_REQUEST_TIMEOUT": "0s"},
+		"bad duration":    {"HTTP_REQUEST_TIMEOUT": "soon"},
+		"bad bool":        {"METRICS_ENABLED": "maybe"},
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadHTTPServer(envValues(values)); err == nil {
+				t.Fatal("loadHTTPServer() error = nil, want validation error")
+			}
+		})
+	}
+}
+
+func TestLoadDatabaseDefaults(t *testing.T) {
+	d, err := loadDatabase(envValues(nil))
+	if err != nil {
+		t.Fatalf("loadDatabase() error = %v", err)
+	}
+
+	if d.Host != "localhost" || d.DbPort != "5432" || d.DBName != "assignment" {
+		t.Errorf("database defaults = %+v", d)
+	}
+	if d.MaxOpenConns != 25 || d.MaxIdleConns != 10 {
+		t.Errorf("API pool = %d/%d, want 25/10", d.MaxOpenConns, d.MaxIdleConns)
+	}
+	if d.ConnMaxLifetime != 30*time.Minute || d.ConnMaxIdleTime != 5*time.Minute {
+		t.Errorf("connection lifetimes = %s/%s", d.ConnMaxLifetime, d.ConnMaxIdleTime)
+	}
+	if d.StatementTimeout != 3*time.Second || d.IdleInTransactionTimeout != 10*time.Second {
+		t.Errorf("API timeouts = %s/%s", d.StatementTimeout, d.IdleInTransactionTimeout)
+	}
+	if d.JobMaxOpenConns != 5 || d.JobMaxIdleConns != 2 || d.JobStatementTimeout != 5*time.Minute {
+		t.Errorf("job pool = %d/%d/%s", d.JobMaxOpenConns, d.JobMaxIdleConns, d.JobStatementTimeout)
+	}
+	if d.ReadDSN != "" || d.ReadMaxOpenConns != 25 || d.ReadMaxIdleConns != 10 {
+		t.Errorf("read replica defaults = %q/%d/%d", d.ReadDSN, d.ReadMaxOpenConns, d.ReadMaxIdleConns)
+	}
+}
+
+func TestLoadDatabaseOverrides(t *testing.T) {
+	d, err := loadDatabase(envValues(map[string]string{
+		"DB_HOST":                        "db.internal",
+		"DB_PORT":                        "5433",
+		"POSTGRES_USER":                  "stocky",
+		"POSTGRES_PASSWORD":              "secret",
+		"POSTGRES_DB":                    "stocky_db",
+		"DB_SSLMODE":                     "require",
+		"DB_MAX_OPEN_CONNS":              "50",
+		"DB_MAX_IDLE_CONNS":              "25",
+		"DB_CONN_MAX_LIFETIME":           "15m",
+		"DB_CONN_MAX_IDLE_TIME":          "2m",
+		"DB_STATEMENT_TIMEOUT":           "5s",
+		"DB_IDLE_IN_TRANSACTION_TIMEOUT": "30s",
+		"DB_JOB_MAX_OPEN_CONNS":          "8",
+		"DB_JOB_MAX_IDLE_CONNS":          "4",
+		"DB_JOB_STATEMENT_TIMEOUT":       "10m",
+		"DB_READ_DSN":                    "host=replica dbname=stocky_db",
+		"DB_READ_MAX_OPEN_CONNS":         "40",
+		"DB_READ_MAX_IDLE_CONNS":         "20",
+	}))
+	if err != nil {
+		t.Fatalf("loadDatabase() error = %v", err)
+	}
+
+	if d.Host != "db.internal" || d.DbPort != "5433" || d.User != "stocky" || d.DBName != "stocky_db" || d.SSLMode != "require" {
+		t.Errorf("connection overrides = %+v", d)
+	}
+	if d.MaxOpenConns != 50 || d.MaxIdleConns != 25 || d.ConnMaxLifetime != 15*time.Minute || d.ConnMaxIdleTime != 2*time.Minute {
+		t.Errorf("pool overrides = %+v", d)
+	}
+	if d.StatementTimeout != 5*time.Second || d.IdleInTransactionTimeout != 30*time.Second {
+		t.Errorf("API timeouts = %s/%s", d.StatementTimeout, d.IdleInTransactionTimeout)
+	}
+	if d.JobMaxOpenConns != 8 || d.JobMaxIdleConns != 4 || d.JobStatementTimeout != 10*time.Minute {
+		t.Errorf("job overrides = %+v", d)
+	}
+	if d.ReadDSN != "host=replica dbname=stocky_db" || d.ReadMaxOpenConns != 40 || d.ReadMaxIdleConns != 20 {
+		t.Errorf("read overrides = %+v", d)
+	}
+}
+
+func TestLoadDatabaseRejectsInvalidValues(t *testing.T) {
+	cases := map[string]map[string]string{
+		"max open":              {"DB_MAX_OPEN_CONNS": "0"},
+		"idle above open":       {"DB_MAX_OPEN_CONNS": "5", "DB_MAX_IDLE_CONNS": "6"},
+		"negative idle":         {"DB_MAX_IDLE_CONNS": "-1"},
+		"conn lifetime":         {"DB_CONN_MAX_LIFETIME": "0s"},
+		"conn idle":             {"DB_CONN_MAX_IDLE_TIME": "0s"},
+		"statement timeout":     {"DB_STATEMENT_TIMEOUT": "0s"},
+		"idle transaction":      {"DB_IDLE_IN_TRANSACTION_TIMEOUT": "-1s"},
+		"job max open":          {"DB_JOB_MAX_OPEN_CONNS": "0"},
+		"job idle above open":   {"DB_JOB_MAX_OPEN_CONNS": "2", "DB_JOB_MAX_IDLE_CONNS": "3"},
+		"job statement timeout": {"DB_JOB_STATEMENT_TIMEOUT": "0s"},
+		"read max open":         {"DB_READ_MAX_OPEN_CONNS": "0"},
+		"read idle above open":  {"DB_READ_MAX_OPEN_CONNS": "2", "DB_READ_MAX_IDLE_CONNS": "3"},
+		"invalid integer":       {"DB_MAX_OPEN_CONNS": "many"},
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadDatabase(envValues(values)); err == nil {
+				t.Fatal("loadDatabase() error = nil, want validation error")
+			}
+		})
+	}
+}
+
 func TestLoadMarketDataDefaults(t *testing.T) {
 	md, err := loadMarketData(envValues(nil))
 	if err != nil {

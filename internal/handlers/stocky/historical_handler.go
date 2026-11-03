@@ -63,7 +63,8 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 	// summary. The function applies the user and date filters before any
 	// lifecycle work, so the page is bounded even when the user has a long
 	// history. A summary-only row is returned when the page is empty.
-	rows, err := h.DB.Query(`
+	started := time.Now()
+	rows, err := h.readDB().QueryContext(c.Request.Context(), `
 		SELECT
 			reward_date,
 			reward_event_id,
@@ -87,9 +88,9 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			unpriced_symbols
 		FROM historical_rewards_for_user($1, $2::date, $3, $4)
 	`, userID, asOfArg, limit, offset)
+	h.Metrics.ObserveQuery("historical", started, err)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch historical INR")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Failed to fetch historical INR", "internal server error", err)
 		return
 	}
 	defer rows.Close()
@@ -145,8 +146,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 			&unpricedRewards,
 			&unpricedSymbols,
 		); err != nil {
-			logger.WithError(err).Error("Failed to scan historical INR record")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+			writeReadError(c, logger, "Failed to scan historical INR record", "internal server error", err)
 			return
 		}
 		sawSummary = true
@@ -198,8 +198,7 @@ func (h *Handler) GetHistoricalINR(c *gin.Context) {
 		history = append(history, rec)
 	}
 	if err := rows.Err(); err != nil {
-		logger.WithError(err).Error("Error iterating historical INR rows")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("internal server error"))
+		writeReadError(c, logger, "Error iterating historical INR rows", "internal server error", err)
 		return
 	}
 	if !sawSummary {

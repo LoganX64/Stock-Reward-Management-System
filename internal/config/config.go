@@ -15,7 +15,9 @@ import (
 const defaultMarketUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 Stocky/1.0"
 
 type HTTPServer struct {
-	Port string
+	Port           string
+	RequestTimeout time.Duration
+	MetricsEnabled bool
 }
 
 type Database struct {
@@ -25,6 +27,25 @@ type Database struct {
 	Password string
 	DBName   string
 	SSLMode  string
+
+	// API pool and timeout settings.
+	MaxOpenConns             int
+	MaxIdleConns             int
+	ConnMaxLifetime          time.Duration
+	ConnMaxIdleTime          time.Duration
+	StatementTimeout         time.Duration
+	IdleInTransactionTimeout time.Duration
+
+	// Background jobs use a separate pool so long-running maintenance work
+	// does not inherit the short API statement timeout.
+	JobMaxOpenConns     int
+	JobMaxIdleConns     int
+	JobStatementTimeout time.Duration
+
+	// ReadDSN is optional. When empty, read handlers use the primary pool.
+	ReadDSN          string
+	ReadMaxOpenConns int
+	ReadMaxIdleConns int
 }
 
 // MarketData holds A3 market-data configuration consumed by the live price
@@ -113,19 +134,20 @@ func LoadFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	database, err := loadDatabase(getEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	httpServer, err := loadHTTPServer(getEnv)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
-		Env: getEnv("ENV", "dev"),
-		Database: Database{
-			Host:     getEnv("DB_HOST", "localhost"),
-			DbPort:   getEnv("DB_PORT", "5432"),
-			User:     getEnv("POSTGRES_USER", "postgres"),
-			Password: getEnv("POSTGRES_PASSWORD", "password"),
-			DBName:   getEnv("POSTGRES_DB", "assignment"),
-			SSLMode:  getEnv("DB_SSLMODE", "disable"),
-		},
-		HTTPServer: HTTPServer{
-			Port: ":" + getEnv("HTTP_PORT", "8080"),
-		},
+		Env:           getEnv("ENV", "dev"),
+		Database:      database,
+		HTTPServer:    httpServer,
 		MigrationPath: getEnv("MIGRATION_PATH", "./internal/database/migrations"),
 		MarketData:    marketData,
 		Projection:    projection,
@@ -140,6 +162,122 @@ func MustLoad() *Config {
 		log.Fatalf("failed to load config: %v", err)
 	}
 	return cfg
+}
+
+func loadHTTPServer(getEnv func(string, string) string) (HTTPServer, error) {
+	h := HTTPServer{
+		Port:           ":" + getEnv("HTTP_PORT", "8080"),
+		RequestTimeout: 10 * time.Second,
+		MetricsEnabled: true,
+	}
+
+	var err error
+	if h.RequestTimeout, err = getDurationEnv(getEnv, "HTTP_REQUEST_TIMEOUT", "10s"); err != nil {
+		return h, err
+	}
+	if h.MetricsEnabled, err = getBoolEnv(getEnv, "METRICS_ENABLED", "true"); err != nil {
+		return h, err
+	}
+	if h.RequestTimeout <= 0 {
+		return h, fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be greater than zero")
+	}
+
+	return h, nil
+}
+
+func loadDatabase(getEnv func(string, string) string) (Database, error) {
+	d := Database{
+		Host:                     getEnv("DB_HOST", "localhost"),
+		DbPort:                   getEnv("DB_PORT", "5432"),
+		User:                     getEnv("POSTGRES_USER", "postgres"),
+		Password:                 getEnv("POSTGRES_PASSWORD", "password"),
+		DBName:                   getEnv("POSTGRES_DB", "assignment"),
+		SSLMode:                  getEnv("DB_SSLMODE", "disable"),
+		MaxOpenConns:             25,
+		MaxIdleConns:             10,
+		ConnMaxLifetime:          30 * time.Minute,
+		ConnMaxIdleTime:          5 * time.Minute,
+		StatementTimeout:         3 * time.Second,
+		IdleInTransactionTimeout: 10 * time.Second,
+		JobMaxOpenConns:          5,
+		JobMaxIdleConns:          2,
+		JobStatementTimeout:      5 * time.Minute,
+		ReadMaxOpenConns:         25,
+		ReadMaxIdleConns:         10,
+	}
+
+	var err error
+	if d.MaxOpenConns, err = getIntEnv(getEnv, "DB_MAX_OPEN_CONNS", "25"); err != nil {
+		return d, err
+	}
+	if d.MaxIdleConns, err = getIntEnv(getEnv, "DB_MAX_IDLE_CONNS", "10"); err != nil {
+		return d, err
+	}
+	if d.ConnMaxLifetime, err = getDurationEnv(getEnv, "DB_CONN_MAX_LIFETIME", "30m"); err != nil {
+		return d, err
+	}
+	if d.ConnMaxIdleTime, err = getDurationEnv(getEnv, "DB_CONN_MAX_IDLE_TIME", "5m"); err != nil {
+		return d, err
+	}
+	if d.StatementTimeout, err = getDurationEnv(getEnv, "DB_STATEMENT_TIMEOUT", "3s"); err != nil {
+		return d, err
+	}
+	if d.IdleInTransactionTimeout, err = getDurationEnv(getEnv, "DB_IDLE_IN_TRANSACTION_TIMEOUT", "10s"); err != nil {
+		return d, err
+	}
+	if d.JobMaxOpenConns, err = getIntEnv(getEnv, "DB_JOB_MAX_OPEN_CONNS", "5"); err != nil {
+		return d, err
+	}
+	if d.JobMaxIdleConns, err = getIntEnv(getEnv, "DB_JOB_MAX_IDLE_CONNS", "2"); err != nil {
+		return d, err
+	}
+	if d.JobStatementTimeout, err = getDurationEnv(getEnv, "DB_JOB_STATEMENT_TIMEOUT", "5m"); err != nil {
+		return d, err
+	}
+	if d.ReadMaxOpenConns, err = getIntEnv(getEnv, "DB_READ_MAX_OPEN_CONNS", "25"); err != nil {
+		return d, err
+	}
+	if d.ReadMaxIdleConns, err = getIntEnv(getEnv, "DB_READ_MAX_IDLE_CONNS", "10"); err != nil {
+		return d, err
+	}
+
+	d.ReadDSN = strings.TrimSpace(getEnv("DB_READ_DSN", ""))
+
+	if d.MaxOpenConns < 1 {
+		return d, fmt.Errorf("DB_MAX_OPEN_CONNS: must be at least 1")
+	}
+	if d.MaxIdleConns < 0 || d.MaxIdleConns > d.MaxOpenConns {
+		return d, fmt.Errorf("DB_MAX_IDLE_CONNS: must be between 0 and DB_MAX_OPEN_CONNS")
+	}
+	if d.ConnMaxLifetime <= 0 {
+		return d, fmt.Errorf("DB_CONN_MAX_LIFETIME: must be greater than zero")
+	}
+	if d.ConnMaxIdleTime <= 0 {
+		return d, fmt.Errorf("DB_CONN_MAX_IDLE_TIME: must be greater than zero")
+	}
+	if d.StatementTimeout <= 0 {
+		return d, fmt.Errorf("DB_STATEMENT_TIMEOUT: must be greater than zero")
+	}
+	if d.IdleInTransactionTimeout < 0 {
+		return d, fmt.Errorf("DB_IDLE_IN_TRANSACTION_TIMEOUT: must not be negative")
+	}
+	if d.JobMaxOpenConns < 1 {
+		return d, fmt.Errorf("DB_JOB_MAX_OPEN_CONNS: must be at least 1")
+	}
+	if d.JobMaxIdleConns < 0 || d.JobMaxIdleConns > d.JobMaxOpenConns {
+		return d, fmt.Errorf("DB_JOB_MAX_IDLE_CONNS: must be between 0 and DB_JOB_MAX_OPEN_CONNS")
+	}
+	if d.JobStatementTimeout <= 0 {
+		return d, fmt.Errorf("DB_JOB_STATEMENT_TIMEOUT: must be greater than zero")
+	}
+	if d.ReadMaxOpenConns < 1 {
+		return d, fmt.Errorf("DB_READ_MAX_OPEN_CONNS: must be at least 1")
+	}
+	if d.ReadMaxIdleConns < 0 || d.ReadMaxIdleConns > d.ReadMaxOpenConns {
+		return d, fmt.Errorf("DB_READ_MAX_IDLE_CONNS: must be between 0 and DB_READ_MAX_OPEN_CONNS")
+	}
+
+	return d, nil
 }
 
 func loadMarketData(getEnv func(string, string) string) (MarketData, error) {

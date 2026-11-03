@@ -3,6 +3,7 @@ package stocky
 import (
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/LoganX64/stocky-api/internal/storage/models"
 	"github.com/LoganX64/stocky-api/internal/utils"
@@ -31,8 +32,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	// outcome all describe the same market date and MVCC state.
 	tx, err := h.beginReadSnapshot(c.Request.Context())
 	if err != nil {
-		logger.WithError(err).Error("Failed to start portfolio read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		writeReadError(c, logger, "Failed to start portfolio read snapshot", "An internal server error occurred", err)
 		return
 	}
 	defer tx.Rollback()
@@ -40,7 +40,8 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	// Query from the shared outcome-aware view. Delist filtering and missing
 	// price handling are applied inside user_portfolio so /portfolio and /stats
 	// cannot diverge.
-	rows, err := tx.Query(`
+	started := time.Now()
+	rows, err := tx.QueryContext(c.Request.Context(), `
 		SELECT
 			p.stock_symbol,
 			p.adjusted_quantity,
@@ -55,10 +56,10 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		ORDER BY p.stock_symbol
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
+	h.Metrics.ObserveQuery("portfolio_page", started, err)
 
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio data for user ")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		writeReadError(c, logger, "Failed to fetch portfolio data for user ", "An internal server error occurred", err)
 		return
 	}
 
@@ -81,8 +82,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 			&priceSource,
 			&priceFetchedAt); err != nil {
 			rows.Close()
-			logger.WithError(err).Error("Failed to scan portfolio data for user ")
-			response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+			writeReadError(c, logger, "Failed to scan portfolio data for user ", "An internal server error occurred", err)
 			return
 		}
 
@@ -112,8 +112,7 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		logger.WithError(err).Error("Error iterating portfolio rows")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		writeReadError(c, logger, "Error iterating portfolio rows", "An internal server error occurred", err)
 		return
 	}
 	if err := rows.Close(); err != nil {
@@ -122,16 +121,14 @@ func (h *Handler) PortfolioHandler(c *gin.Context) {
 		return
 	}
 
-	summary, err := h.getPortfolioSummary(tx, userID)
+	summary, err := h.getPortfolioSummary(c.Request.Context(), tx, userID)
 	if err != nil {
-		logger.WithError(err).Error("Failed to fetch portfolio summary")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		writeReadError(c, logger, "Failed to fetch portfolio summary", "An internal server error occurred", err)
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		logger.WithError(err).Error("Failed to commit portfolio read snapshot")
-		response.WriteJson(c.Writer, http.StatusInternalServerError, response.ErrorResponse("An internal server error occurred"))
+		writeReadError(c, logger, "Failed to commit portfolio read snapshot", "An internal server error occurred", err)
 		return
 	}
 

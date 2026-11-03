@@ -415,3 +415,11 @@ This document describes the Phase 0 baseline only. Later runs are archived in
   query set now mirrors those statements (`portfolio_summary.sql` and
   `stats_today.sql` replace the four obsolete portfolio files). No HTTP load
   test has been run after Phase 3; the Phase 6 profiles remain outstanding.
+- **Phase 4 quick profile (partial), 3 Nov 2026:**
+  `bench/results/phase0-20261103-135155/`. The run used the default 25/10 API
+  pool with a 3 s statement timeout and the split jobs pool. Warm-up (50 req/s)
+  completed with 983 requests, 0 errors, p50 3.5 ms, p95 16.4 ms, p99 36.3 ms.
+  Steady (278 req/s) completed with 32,860 requests, 0 errors, p50 3.3 ms,
+  p95 20.9 ms, p99 132.7 ms, max 605.8 ms. The 1,000 req/s peak phase was
+  interrupted, so the run has no `summary.txt` or `api-metrics.txt`; the full
+  1-hour and 2–3× peak proof remains Phase 6.

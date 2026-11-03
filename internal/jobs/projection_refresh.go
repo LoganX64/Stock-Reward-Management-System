@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LoganX64/stocky-api/internal/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -28,6 +29,7 @@ type ProjectionRefreshService struct {
 	timeout            time.Duration
 	alerter            Alerter
 	limiter            *alertLimiter
+	metrics            *metrics.Metrics
 	started            int32
 	configured         int32
 	lastPrune          time.Time
@@ -48,6 +50,7 @@ type ProjectionRefreshServiceOptions struct {
 	SyncUserLimit      int
 	Timeout            time.Duration
 	Alerter            Alerter
+	Metrics            *metrics.Metrics
 }
 
 func NewProjectionRefreshService(db DB) *ProjectionRefreshService {
@@ -118,6 +121,7 @@ func NewProjectionRefreshServiceWithOptions(db DB, opts *ProjectionRefreshServic
 		timeout:            options.Timeout,
 		alerter:            options.Alerter,
 		limiter:            newAlertLimiter(options.AlertCooldown),
+		metrics:            options.Metrics,
 	}
 }
 
@@ -162,11 +166,13 @@ func (s *ProjectionRefreshService) process(ctx context.Context) {
 	}
 
 	processed := 0
+	drainOK := true
 drain:
 	for processed < s.batchSize {
 		outcome, userID, attempts, lastErr, err := s.processOne(ctx)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to process projection refresh queue")
+			drainOK = false
 			break
 		}
 
@@ -205,6 +211,9 @@ drain:
 	}
 
 	s.reportHealth(ctx)
+	if drainOK {
+		s.metrics.MarkJobSuccess("projection_refresh", time.Now())
+	}
 
 	if time.Since(s.lastPrune) >= time.Hour {
 		if pruned, err := s.prune(ctx); err != nil {
@@ -292,6 +301,15 @@ func (s *ProjectionRefreshService) reportHealth(ctx context.Context) {
 		}).Debug("Projection refresh queue statistics")
 	}
 
+	s.metrics.ObserveProjectionQueue(metrics.ProjectionQueueStats{
+		Pending:              stats.pending,
+		Ready:                stats.ready,
+		Failed:               stats.failed,
+		Processed:            stats.processed,
+		OldestPendingSeconds: stats.oldestPendingSeconds,
+		MaxAttempts:          stats.maxAttempts,
+	})
+
 	if stats.failed > 0 {
 		s.limiter.send(ctx, s.alerter, "queue-failed", "projection_queue_failed", logrus.Fields{
 			"failed":                 stats.failed,
@@ -320,6 +338,12 @@ func (s *ProjectionRefreshService) reportHealth(ctx context.Context) {
 		logrus.WithError(err).Warn("Failed to read projection factor status")
 		return
 	}
+
+	s.metrics.ObserveProjectionFactors(metrics.ProjectionFactorStats{
+		Total:   total,
+		Stale:   stale,
+		Invalid: invalid,
+	})
 	if stale > 0 || invalid > 0 {
 		// Only re-alert when the stale count changes; otherwise a long weekend
 		// or a paused rollover would emit the same error every tick.

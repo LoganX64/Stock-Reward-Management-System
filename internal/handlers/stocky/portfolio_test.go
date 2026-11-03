@@ -1,6 +1,7 @@
 package stocky
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -257,7 +258,7 @@ func TestGetPortfolioSummary_ZeroHoldings(t *testing.T) {
 			"valuation_date",
 		}).AddRow(nil, nil, nil, nil, nil, nil, nil, nil, nil, "2026-10-28"))
 
-	summary, err := handler.getPortfolioSummary(db, 9)
+	summary, err := handler.getPortfolioSummary(context.Background(), db, 9)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

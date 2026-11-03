@@ -45,6 +45,7 @@ The system maintains a ledger for stock units, INR outflows, brokerage, STT, and
 | Method | Endpoint                         | Description                                |
 | ------ | -------------------------------- | ------------------------------------------ |
 | GET    | `/health`                        | Health check endpoint.                     |
+| GET    | `/metrics`                       | Prometheus metrics; enabled by default.    |
 | POST   | `/api/v1/reward`                 | Create a reward entry.                     |
 | POST   | `/api/v1/adjustments/:id`        | Apply adjustment to a reward.              |
 | GET    | `/api/v1/today-stocks/:userId`   | Fetch today's rewards with adjustments.    |
@@ -480,6 +481,51 @@ Supported variables:
 - `HTTP_PORT` - API port.
 - `MIGRATION_PATH` - Path to database migrations.
 
+### Database, HTTP, and metrics variables
+
+Durations use Go `time.ParseDuration` syntax (`3s`, `30m`, `5m`). The API and background jobs use separate pools so a long rollover or reconciliation query does not inherit the short read timeout.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DB_MAX_OPEN_CONNS` | `25` | API pool maximum open connections. |
+| `DB_MAX_IDLE_CONNS` | `10` | API pool idle connections. |
+| `DB_CONN_MAX_LIFETIME` | `30m` | Maximum connection lifetime for both pools. |
+| `DB_CONN_MAX_IDLE_TIME` | `5m` | Maximum idle time for both pools. |
+| `DB_STATEMENT_TIMEOUT` | `3s` | PostgreSQL `statement_timeout` for API queries. |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT` | `10s` | PostgreSQL `idle_in_transaction_session_timeout` for both pools. |
+| `DB_JOB_MAX_OPEN_CONNS` | `5` | Background-job pool maximum open connections. |
+| `DB_JOB_MAX_IDLE_CONNS` | `2` | Background-job pool idle connections. |
+| `DB_JOB_STATEMENT_TIMEOUT` | `5m` | PostgreSQL `statement_timeout` for jobs. |
+| `DB_READ_DSN` | empty | Optional read-replica DSN. When empty, reporting reads use the primary. |
+| `DB_READ_MAX_OPEN_CONNS` | `25` | Read-replica pool maximum open connections. |
+| `DB_READ_MAX_IDLE_CONNS` | `10` | Read-replica pool idle connections. |
+| `HTTP_REQUEST_TIMEOUT` | `10s` | Deadline applied to every HTTP request context. |
+| `METRICS_ENABLED` | `true` | Expose Prometheus metrics at `/metrics`. |
+
+Invalid pool sizes, a non-positive timeout, or an idle count larger than the pool maximum fail at startup with an error naming the variable.
+
+#### Timeouts
+
+Every request receives a context deadline. Read handlers use `QueryContext`, so PostgreSQL cancels work when the deadline expires. A request-deadline error or PostgreSQL SQLSTATE `57014` (`query_canceled`, also used by `statement_timeout`) is returned as `503 Service Unavailable`; other database failures remain `500 Internal Server Error`. Write handlers use the same request context with a 5-second budget.
+
+#### Metrics
+
+`GET /metrics` exposes Prometheus text format from the API process. The endpoint is served by the Prometheus Go client; no Prometheus server or container is required. The main series are:
+
+- `stocky_http_requests_total`, `stocky_http_request_duration_seconds`, `stocky_http_in_flight_requests`
+- `stocky_db_pool_*` for the `api`, `jobs`, and optional `read` pools
+- `stocky_db_query_duration_seconds` and `stocky_db_query_errors_total` by named query
+- `stocky_projection_queue_*`, `stocky_projection_factor_*`, and `stocky_projection_reconciliation_*`
+- `stocky_projection_job_last_success_timestamp_seconds` by job
+
+The queue, factor, reconciliation, and job gauges are refreshed by the background services, so they remain at zero until those services run.
+
+#### Read replica and multiple instances
+
+`DB_READ_DSN` is opt-in. Reporting reads (`/portfolio`, `/stats`, `/today-stocks`, and `/historical-inr`) use the read pool when it is configured; writes always use the primary. The read pool inherits `DB_STATEMENT_TIMEOUT`, `DB_IDLE_IN_TRANSACTION_TIMEOUT`, and the connection lifetimes; its DSN may be a URL or a keyword string. Because a replica can lag, a user who has just written data may briefly see stale read results. Leave `DB_READ_DSN` empty when read-your-writes is required.
+
+PgBouncer is not started by this repository. It is an external prerequisite when running multiple API instances: point `DB_HOST`/`DB_PORT` at PgBouncer in transaction mode and keep the total of all instance pools (plus jobs pools) below PostgreSQL `max_connections`. Do not multiply a large per-instance pool across instances without a pooler.
+
 ### Market-data variables
 
 `MARKET_DATA_PROVIDER=yahoo` is the default. The simulator remains available for offline development. Market-data durations use Go `time.ParseDuration` syntax (`60m`, `90m`, `1s`).
@@ -606,11 +652,13 @@ Market-data and job tests cover:
 - `/cmd/rebuild-projections/main.go` - Online backfill and offline repair of the read projections.
 - `/cmd/reset-migrations.go` - Migration reset utility.
 - `/internal/config/` - Environment configuration.
+- `/internal/database/` - Connection pool and DSN helpers.
 - `/internal/database/migrations/` - SQL migrations and projection views/functions.
 - `/internal/handlers/stocky/` - HTTP handlers, route setup, and tests.
 - `/internal/jobs/` - Quote scheduler, bhavcopy EOD ingestion, history backfill, corporate-action rollover, projection queue worker, reconciliation, and alerting.
 - `/internal/marketcal/` - NSE trading calendar and freshness policy.
 - `/internal/marketdata/` - Provider contracts, Yahoo/bhavcopy/simulator providers, and HTTP client.
+- `/internal/metrics/` - Prometheus registry, HTTP/query metrics, DB pool collector, and projection gauges.
 - `/internal/storage/models/` - Data models.
 - `/internal/utils/` - Rounding and JSON helpers.
 - `/internal/utils/response/` - JSON response helpers.

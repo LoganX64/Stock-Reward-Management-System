@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,37 +13,23 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	_ "github.com/lib/pq"
-
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 
 	"github.com/LoganX64/stocky-api/internal/config"
+	"github.com/LoganX64/stocky-api/internal/database"
 	"github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	routes "github.com/LoganX64/stocky-api/internal/handlers/stocky"
 	"github.com/LoganX64/stocky-api/internal/jobs"
 	"github.com/LoganX64/stocky-api/internal/marketcal"
 	"github.com/LoganX64/stocky-api/internal/marketdata"
+	"github.com/LoganX64/stocky-api/internal/metrics"
 )
 
 func main() {
 	cfg := config.MustLoad()
 	logMarketDataConfig(cfg)
-
-	// =======================
-	// DB Setup
-	// =======================
-	db, err := setupDB(cfg)
-	if err != nil {
-		logrus.Fatalf("database setup failed: %v", err)
-	}
-
-	defer func() {
-		if err := db.Close(); err != nil {
-			logrus.WithError(err).Error("Failed to close DB cleanly")
-		}
-	}()
 
 	// =======================
 	// Migrations
@@ -64,6 +49,107 @@ func main() {
 	logrus.Info("Migrations applied successfully")
 
 	// =======================
+	// DB Pools
+	// =======================
+
+	// The API pool uses a short statement timeout so a slow report cannot
+	// occupy a connection indefinitely. Background jobs get their own pool with
+	// a longer timeout for rollover and reconciliation work.
+	apiDB, err := database.Open(database.ConnectOptions{
+		Host:                     cfg.Database.Host,
+		Port:                     cfg.Database.DbPort,
+		User:                     cfg.Database.User,
+		Password:                 cfg.Database.Password,
+		DBName:                   cfg.Database.DBName,
+		SSLMode:                  cfg.Database.SSLMode,
+		MaxOpenConns:             cfg.Database.MaxOpenConns,
+		MaxIdleConns:             cfg.Database.MaxIdleConns,
+		ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
+		ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
+		StatementTimeout:         cfg.Database.StatementTimeout,
+		IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
+		ApplicationName:          "stocky-api",
+	})
+	if err != nil {
+		logrus.Fatalf("database setup failed: %v", err)
+	}
+	defer func() {
+		if err := apiDB.Close(); err != nil {
+			logrus.WithError(err).Error("Failed to close API DB cleanly")
+		}
+	}()
+	logrus.WithFields(logrus.Fields{
+		"max_open":            cfg.Database.MaxOpenConns,
+		"max_idle":            cfg.Database.MaxIdleConns,
+		"statement_timeout":   cfg.Database.StatementTimeout.String(),
+		"idle_in_transaction": cfg.Database.IdleInTransactionTimeout.String(),
+	}).Info("API database pool ready")
+
+	jobsDB, err := database.Open(database.ConnectOptions{
+		Host:                     cfg.Database.Host,
+		Port:                     cfg.Database.DbPort,
+		User:                     cfg.Database.User,
+		Password:                 cfg.Database.Password,
+		DBName:                   cfg.Database.DBName,
+		SSLMode:                  cfg.Database.SSLMode,
+		MaxOpenConns:             cfg.Database.JobMaxOpenConns,
+		MaxIdleConns:             cfg.Database.JobMaxIdleConns,
+		ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
+		ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
+		StatementTimeout:         cfg.Database.JobStatementTimeout,
+		IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
+		ApplicationName:          "stocky-jobs",
+	})
+	if err != nil {
+		logrus.Fatalf("jobs database setup failed: %v", err)
+	}
+	defer func() {
+		if err := jobsDB.Close(); err != nil {
+			logrus.WithError(err).Error("Failed to close jobs DB cleanly")
+		}
+	}()
+	logrus.WithFields(logrus.Fields{
+		"max_open":          cfg.Database.JobMaxOpenConns,
+		"max_idle":          cfg.Database.JobMaxIdleConns,
+		"statement_timeout": cfg.Database.JobStatementTimeout.String(),
+	}).Info("Jobs database pool ready")
+
+	readDB := apiDB
+	if cfg.Database.ReadDSN != "" {
+		readPool, err := database.OpenDSN(cfg.Database.ReadDSN, database.PoolOptions{
+			MaxOpenConns:             cfg.Database.ReadMaxOpenConns,
+			MaxIdleConns:             cfg.Database.ReadMaxIdleConns,
+			ConnMaxLifetime:          cfg.Database.ConnMaxLifetime,
+			ConnMaxIdleTime:          cfg.Database.ConnMaxIdleTime,
+			StatementTimeout:         cfg.Database.StatementTimeout,
+			IdleInTransactionTimeout: cfg.Database.IdleInTransactionTimeout,
+			ApplicationName:          "stocky-read",
+		})
+		if err != nil {
+			logrus.Fatalf("read replica setup failed: %v", err)
+		}
+		defer func() {
+			if err := readPool.Close(); err != nil {
+				logrus.WithError(err).Error("Failed to close read replica DB cleanly")
+			}
+		}()
+		readDB = readPool
+		logrus.WithFields(logrus.Fields{
+			"max_open": cfg.Database.ReadMaxOpenConns,
+			"max_idle": cfg.Database.ReadMaxIdleConns,
+		}).Warn("Read replica configured: reads may observe bounded replication lag")
+	} else {
+		logrus.Info("Read replica disabled: reporting reads use the primary pool")
+	}
+
+	m := metrics.New()
+	m.RegisterDBPool("api", apiDB)
+	m.RegisterDBPool("jobs", jobsDB)
+	if cfg.Database.ReadDSN != "" {
+		m.RegisterDBPool("read", readDB)
+	}
+
+	// =======================
 	// Root Context
 	// =======================
 
@@ -72,7 +158,7 @@ func main() {
 	// =======================
 	// Background Price Jobs
 	// =======================
-	priceStore := jobs.NewPriceStore(db, nil)
+	priceStore := jobs.NewPriceStore(jobsDB, nil)
 	priceServiceDone := make(chan struct{})
 	bhavcopyDone := make(chan struct{})
 
@@ -120,8 +206,9 @@ func main() {
 	// =======================
 	// Background Corporate Action Job
 	// =======================
-	corporateActionService := jobs.NewCorporateActionServiceWithOptions(db, &jobs.CorporateActionServiceOptions{
+	corporateActionService := jobs.NewCorporateActionServiceWithOptions(jobsDB, &jobs.CorporateActionServiceOptions{
 		Interval: cfg.Projection.CorporateActionInterval,
+		Metrics:  m,
 	})
 	corporateActionDone := make(chan struct{})
 	go func() {
@@ -132,7 +219,7 @@ func main() {
 	// =======================
 	// Projection Queue Worker
 	// =======================
-	projectionRefreshService := jobs.NewProjectionRefreshServiceWithOptions(db, &jobs.ProjectionRefreshServiceOptions{
+	projectionRefreshService := jobs.NewProjectionRefreshServiceWithOptions(jobsDB, &jobs.ProjectionRefreshServiceOptions{
 		Interval:           cfg.Projection.RefreshInterval,
 		BatchSize:          cfg.Projection.RefreshBatch,
 		MaxAttempts:        cfg.Projection.QueueMaxAttempts,
@@ -141,6 +228,7 @@ func main() {
 		AlertDepth:         cfg.Projection.QueueAlertDepth,
 		AlertLag:           cfg.Projection.QueueAlertLag,
 		SyncUserLimit:      cfg.Projection.SyncUserLimit,
+		Metrics:            m,
 	})
 	projectionRefreshDone := make(chan struct{})
 	go func() {
@@ -151,10 +239,11 @@ func main() {
 	// =======================
 	// Projection Reconciliation Job
 	// =======================
-	reconciliationService := jobs.NewReconciliationServiceWithOptions(db, &jobs.ReconciliationServiceOptions{
+	reconciliationService := jobs.NewReconciliationServiceWithOptions(jobsDB, &jobs.ReconciliationServiceOptions{
 		Interval:      cfg.Projection.ReconciliationInterval,
 		SamplePercent: cfg.Projection.ReconciliationSamplePercent,
 		MaxUsers:      cfg.Projection.ReconciliationMaxUsers,
+		Metrics:       m,
 	})
 	reconciliationDone := make(chan struct{})
 	go func() {
@@ -166,10 +255,23 @@ func main() {
 	// HTTP Server
 	// =======================
 	r := gin.Default()
-	handler := stocky.NewHandler(db,
+	handler := stocky.NewHandler(apiDB,
+		stocky.WithReadDB(readDB),
+		stocky.WithMetrics(m),
 		stocky.WithCalendar(calendar),
 		stocky.WithFreshness(freshness),
 	)
+
+	if cfg.HTTPServer.MetricsEnabled {
+		r.Use(m.GinMiddleware())
+	} else {
+		logrus.Info("Prometheus /metrics endpoint disabled by METRICS_ENABLED=false")
+	}
+	r.Use(stocky.RequestTimeout(cfg.HTTPServer.RequestTimeout))
+	if cfg.HTTPServer.MetricsEnabled {
+		r.GET("/metrics", gin.WrapH(m.Handler()))
+	}
+
 	// Register routes with the handler
 	routes.Routes(r, handler)
 
@@ -242,44 +344,6 @@ func main() {
 	logrus.Info("Server exited properly")
 
 }
-
-// =======================
-// DB Setup
-// =======================
-
-func setupDB(cfg *config.Config) (*sql.DB, error) {
-	connStr := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Database.Host,
-		cfg.Database.DbPort,
-		cfg.Database.User,
-		cfg.Database.Password,
-		cfg.Database.DBName,
-		cfg.Database.SSLMode,
-	)
-
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		return nil, fmt.Errorf("sql.Open: %w", err)
-	}
-
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(30 * time.Minute)
-	db.SetConnMaxIdleTime(5 * time.Minute)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("db.Ping: %w", err)
-	}
-
-	logrus.Info("Connected to database successfully")
-	return db, nil
-}
-
-// =======================
-// Migrations
-// =======================
 
 // =======================
 // Market Data Provider
