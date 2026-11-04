@@ -191,6 +191,24 @@ func TestProxyForwardsToBackend(t *testing.T) {
 	}
 }
 
+func TestProxyUsesSharedPooledTransport(t *testing.T) {
+	lb, err := newLoadBalancer([]string{"http://api-a:8080", "http://api-b:8080"}, "round-robin", "/health")
+	if err != nil {
+		t.Fatalf("newLoadBalancer() error = %v", err)
+	}
+	if lb.transport == nil {
+		t.Fatal("newLoadBalancer() transport = nil, want a pooled transport")
+	}
+	if lb.transport.MaxIdleConnsPerHost < 256 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want at least 256 for a load test", lb.transport.MaxIdleConnsPerHost)
+	}
+	for _, b := range lb.backends {
+		if b.proxy.Transport != lb.transport {
+			t.Fatalf("backend %s does not use the shared transport", b.url)
+		}
+	}
+}
+
 func TestProbeAllMarksBackendsHealthy(t *testing.T) {
 	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {

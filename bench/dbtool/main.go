@@ -7,8 +7,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -56,11 +58,15 @@ func main() {
 	writers := flag.Int("writers", 4, "concurrent writers during rebuild-check")
 	writeInterval := flag.Duration("write-interval", 500*time.Millisecond, "delay between concurrent writes during rebuild-check")
 	writeLimit := flag.Int("write-limit", 250, "maximum rewards each concurrent writer inserts")
+	reconcileSamplePercent := flag.Float64("sample-percent", 0.1, "reconciliation sample percent")
+	reconcileMaxUsers := flag.Int("max-users", 500, "maximum users to reconcile")
+	reconcileMaxDetails := flag.Int("max-details", 1000, "maximum mismatch details to retain")
+	reconcileTimeout := flag.Duration("reconcile-timeout", 30*time.Minute, "reconciliation timeout")
 	flag.Parse()
 
 	command := flag.Arg(0)
 	if command == "" {
-		fmt.Fprintln(os.Stderr, "usage: dbtool <setup|seed|explain|stats|settings|activity|sessions|stop-sessions|enable-stats|disable-stats|reset-stats|counts|write-overhead|rebuild-check> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: dbtool <setup|seed|explain|stats|settings|activity|sessions|stop-sessions|enable-stats|disable-stats|reset-stats|counts|write-overhead|rebuild-check|reconcile> [flags]")
 		os.Exit(2)
 	}
 
@@ -140,6 +146,10 @@ func main() {
 	case "rebuild-check":
 		if err := rebuildCheck(cfg.Database, *rebuildBin, *rebuildRuns, *writers, *writeInterval, *writeLimit, *out); err != nil {
 			fatal("rebuild-check: %v", err)
+		}
+	case "reconcile":
+		if err := reconcile(cfg.Database, *reconcileSamplePercent, *reconcileMaxUsers, *reconcileMaxDetails, *reconcileTimeout, *out); err != nil {
+			fatal("reconcile: %v", err)
 		}
 	default:
 		fatal("unknown command %q", command)
@@ -693,6 +703,116 @@ func counts(dbConfig config.Database, outPath string) error {
 		return err
 	}
 	return writeOutput(outPath, builder.String())
+}
+
+// reconcile runs the production projection reconciliation function over a
+// larger sample than the background service uses by default. A non-zero
+// mismatch count is returned as an error so a scripted Phase 6 run fails loudly.
+func reconcile(dbConfig config.Database, samplePercent float64, maxUsers, maxDetails int, timeout time.Duration, outPath string) error {
+	if samplePercent <= 0 || samplePercent > 100 {
+		return fmt.Errorf("-sample-percent must be greater than 0 and at most 100")
+	}
+	if maxUsers < 1 {
+		return fmt.Errorf("-max-users must be at least 1")
+	}
+	if maxDetails < 0 {
+		return fmt.Errorf("-max-details must not be negative")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("-reconcile-timeout must be greater than zero")
+	}
+
+	db, err := open(dbConfig, dbConfig.DBName, 2)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	started := time.Now()
+	var usersChecked, mismatchCount int
+	var raw []byte
+	err = db.QueryRowContext(ctx, `
+		SELECT users_checked, mismatch_count, mismatches
+		FROM run_projection_reconciliation($1, $2, $3)
+	`, samplePercent, maxUsers, maxDetails).Scan(&usersChecked, &mismatchCount, &raw)
+	if err != nil {
+		return err
+	}
+	elapsed := time.Since(started)
+
+	var mismatches []json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &mismatches); err != nil {
+			return fmt.Errorf("decode reconciliation mismatches: %w", err)
+		}
+	}
+
+	var queuePending, queueReady, queueFailed, queueProcessed, oldestPendingSeconds int64
+	var queueMaxAttempts int
+	queueErr := db.QueryRowContext(ctx, `
+		SELECT pending, ready, failed, processed, oldest_pending_seconds, max_attempts
+		FROM projection_queue_stats()
+	`).Scan(&queuePending, &queueReady, &queueFailed, &queueProcessed, &oldestPendingSeconds, &queueMaxAttempts)
+
+	var factorTotal, factorStale, factorInvalid int64
+	factorErr := db.QueryRowContext(ctx, `
+		SELECT total, stale, invalid
+		FROM projection_factor_status()
+	`).Scan(&factorTotal, &factorStale, &factorInvalid)
+
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "database\t%s\n", dbConfig.DBName)
+	fmt.Fprintf(&builder, "sample_percent\t%g\n", samplePercent)
+	fmt.Fprintf(&builder, "max_users\t%d\n", maxUsers)
+	fmt.Fprintf(&builder, "max_details\t%d\n", maxDetails)
+	fmt.Fprintf(&builder, "users_checked\t%d\n", usersChecked)
+	fmt.Fprintf(&builder, "mismatch_count\t%d\n", mismatchCount)
+	fmt.Fprintf(&builder, "duration_ms\t%d\n", elapsed.Milliseconds())
+
+	if queueErr == nil {
+		fmt.Fprintf(&builder, "queue_pending\t%d\n", queuePending)
+		fmt.Fprintf(&builder, "queue_ready\t%d\n", queueReady)
+		fmt.Fprintf(&builder, "queue_failed\t%d\n", queueFailed)
+		fmt.Fprintf(&builder, "queue_processed\t%d\n", queueProcessed)
+		fmt.Fprintf(&builder, "queue_oldest_pending_seconds\t%d\n", oldestPendingSeconds)
+		fmt.Fprintf(&builder, "queue_max_attempts\t%d\n", queueMaxAttempts)
+	} else {
+		fmt.Fprintf(&builder, "queue_status_error\t%v\n", queueErr)
+	}
+
+	if factorErr == nil {
+		fmt.Fprintf(&builder, "factor_total\t%d\n", factorTotal)
+		fmt.Fprintf(&builder, "factor_stale\t%d\n", factorStale)
+		fmt.Fprintf(&builder, "factor_invalid\t%d\n", factorInvalid)
+	} else {
+		fmt.Fprintf(&builder, "factor_status_error\t%v\n", factorErr)
+	}
+
+	for index, detail := range mismatches {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, detail); err != nil {
+			fmt.Fprintf(&builder, "mismatch_%d\t%s\n", index+1, string(detail))
+			continue
+		}
+		fmt.Fprintf(&builder, "mismatch_%d\t%s\n", index+1, compact.String())
+	}
+	if mismatchCount > len(mismatches) {
+		fmt.Fprintf(&builder, "mismatch_details_truncated\t%d\n", mismatchCount-len(mismatches))
+	}
+
+	if err := writeOutput(outPath, builder.String()); err != nil {
+		return err
+	}
+	if mismatchCount > 0 {
+		if outPath != "" {
+			return fmt.Errorf("found %d projection mismatch(es); details in %s", mismatchCount, outPath)
+		}
+		return fmt.Errorf("found %d projection mismatch(es)", mismatchCount)
+	}
+	return nil
 }
 
 // writeOverhead compares trigger-enabled and trigger-suppressed reward and

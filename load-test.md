@@ -269,8 +269,8 @@ The plans use `portfolio_position_pkey`, `idx_reward_state_user_date`, and
 `idx_rewards_user_date`, with no sequential scan on `rewards`, `reward_state`,
 `portfolio_position`, or `reward_corporate_action_outcomes`. The
 `stats_today`/`today` pairs show user 1 (no rewards today) and a row-bearing
-user 40. These are single-statement plans; the Phase 6 HTTP load test is still
-outstanding.
+user 40. These are single-statement plans; the Phase 6 HTTP load test is
+recorded in section 11.
 
 ### Capacity implication
 
@@ -407,28 +407,109 @@ This document describes the Phase 0 baseline only. Later runs are archived in
 - **Phase 2 checks, 3 Nov 2026:**
   `bench/results/manual-phase2/README.md`. This records the write-overhead
   benchmark, the live rebuild check, the full test-suite log, and the per-test
-  results. No HTTP load test has been run after Phase 2; the Phase 6 1-hour
-  profiles remain outstanding.
+  results. No HTTP load test was run between Phase 2 and Phase 3; the Phase 6
+  proof is recorded in section 11.
 - **Phase 3 read path, 3 Nov 2026:** `/portfolio` and `/stats` were reduced to
   two queries each, `/today-stocks` reads `reward_state` directly, and
   `/historical-inr` calls `historical_rewards_for_user()` once. The benchmark
   query set now mirrors those statements (`portfolio_summary.sql` and
-  `stats_today.sql` replace the four obsolete portfolio files). No HTTP load
-  test has been run after Phase 3; the Phase 6 profiles remain outstanding.
+  `stats_today.sql` replace the four obsolete portfolio files). The Phase 6
+  proof uses these statements; see section 11.
 - **Phase 4 quick profile (partial), 3 Nov 2026:**
   `bench/results/phase0-20261103-135155/`. The run used the default 25/10 API
   pool with a 3 s statement timeout and the split jobs pool. Warm-up (50 req/s)
   completed with 983 requests, 0 errors, p50 3.5 ms, p95 16.4 ms, p99 36.3 ms.
   Steady (278 req/s) completed with 32,860 requests, 0 errors, p50 3.3 ms,
   p95 20.9 ms, p99 132.7 ms, max 605.8 ms. The 1,000 req/s peak phase was
-  interrupted, so the run has no `summary.txt` or `api-metrics.txt`; the full
-  1-hour and 2–3× peak proof remains Phase 6.
+  interrupted, so the run has no `summary.txt` or `api-metrics.txt`. Phase 6
+  later completed the 1-hour steady proof and measured the peak ceiling
+  (section 11).
 - **Phase 5 multi-instance implementation, 3 Nov 2026:** ETag/304 handling, a
   per-process response cache, per-user rate limiting, and role-separated startup
   (`APP_ROLE=all|api|worker|migrate`) were added. `bench/lb` can run multiple
   API processes behind round-robin or user-hash routing, and
   `docker-compose.scale.yml` shows the nginx topology. Unit tests cover cache
   hits, 304 responses, per-user invalidation, TTL/LRU eviction, limiter bursts,
-  refill, isolation, and eviction. A full HTTP load test through the load
-  balancer has not been recorded yet; the Phase 6 1-hour profiles remain
-  outstanding.
+  refill, isolation, and eviction. Phase 6 records a full three-instance run
+  through the load balancer (section 11).
+
+---
+
+## 11. Phase 6 proof (4 Nov 2026)
+
+Phase 6 ran two one-hour profiles against `stocky_bench` on the benchmark host:
+Intel i5-12400F (6 cores / 12 threads), 8 GB RAM, PostgreSQL 17 with
+`max_connections=100` and `shared_buffers=128 MB`. The dataset was 20,000 users,
+500,000 rewards, 500,000 `reward_state` rows, 499,167 `portfolio_position` rows,
+and 3,006 `instrument_factor` rows. Both runs used `-skip-seed -skip-plans
+-skip-rebuild`.
+
+### Steady profile — pass
+
+Run: `bench/results/phase0-steady-hour-20261104-194320/`. One API, 60 s warm-up
+at 50 req/s, then 60 minutes at 278 req/s (1,000,800 requests at the target
+rate).
+
+| Metric | Result |
+|---|---:|
+| Steady requests | 1,000,284 |
+| Errors | 0 (all `200`) |
+| p50 / p95 / p99 | 3.1 / 11.2 / 16.8 ms |
+| Throughput | 278.0 req/s |
+
+Per-route p95 from the Prometheus histogram buckets: portfolio 10 ms, stats
+5 ms, today-stocks 5 ms, historical-inr 25 ms. The steady target is met with
+wide headroom.
+
+### Peak profile — measured shortfall
+
+Run: `bench/results/phase0-peak-2x-hour-20261104-204525/`. Three APIs behind
+`bench/lb` (round-robin), 60 s warm-up, then 60 minutes at 2,000 req/s (2× the
+design peak), with `DB_MAX_OPEN_CONNS=DB_MAX_IDLE_CONNS=6`.
+
+| Metric | Result |
+|---|---:|
+| Peak requests | 5,503,355 |
+| Throughput | ~1,529 req/s (76% of target) |
+| Errors | 325 (0.0059%, all client status `0`) |
+| p50 / p95 / p99 | 96.3 / 861.4 / 1,706.5 ms |
+
+The host was CPU-bound. Round-robin delivered the same request count to each
+instance, but connection-pool queueing was skewed:
+
+| API port | Mean HTTP latency | Mean pool wait |
+|---|---:|---:|
+| 18080 | 386 ms | 373 ms |
+| 18081 | 60 ms | 49 ms |
+| 18082 | 133 ms | 120 ms |
+
+PostgreSQL query time was a small fraction of each request; the rest was pool
+wait. A 60 s peak smoke with the same topology reached ~1,895 req/s (29 errors,
+p95 413 ms), and a zero-error 60 s run reached ~1,841 req/s (p95 486 ms).
+Pool sweeps showed 3×25 connections collapsed to ~835 req/s, while 3×4, 3×5,
+and 3×6 reached ~1,841, ~1,845, and ~1,895 req/s in short runs. Limiting
+`GOMAXPROCS` also reduced throughput. The full 2,000 req/s peak is therefore a
+capacity limit of this single host, not a harness failure.
+
+### Reconciliation — pass
+
+A 10% sample capped at 2,000 users ran in 10.6 s after the peak profile:
+`users_checked=2000`, `mismatch_count=0`, queue pending/ready/failed 0, and
+`factor_invalid=0`. `projection_factor_status()` reported 3,006 stale factors
+because `APP_ROLE=api` deliberately skips the corporate-action job that refreshes
+the cache; the read path falls back safely. Run `APP_ROLE=worker` (or `all`) to
+refresh it.
+
+### Known limits
+
+- The 2,000 req/s peak is not demonstrated on one 6-core/12-thread machine with
+  8 GB RAM. Sustained ceiling was ~1,529 req/s.
+- All processes shared one host: API replicas, load generator, load balancer,
+  and PostgreSQL. Production needs separate database capacity or larger hosts.
+- `shared_buffers` is 128 MB and `pg_stat_statements` is not preloaded, so
+  server-side query accounting was unavailable and buffer cache relies on the
+  OS.
+- The response cache and rate limiter are per process (5 s TTL, 20 req/s +
+  40 burst per user by default), so aggregate limits scale with replicas.
+- Per-instance API logs reached ~192 MB for the one-hour peak run; rotate or
+  disable request logging for long runs.

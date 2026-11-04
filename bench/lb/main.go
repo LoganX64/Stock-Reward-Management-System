@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -43,6 +44,28 @@ type loadBalancer struct {
 	strategy   string
 	healthPath string
 	next       atomic.Uint64
+	transport  *http.Transport
+}
+
+// newProxyTransport returns a transport tuned for a local benchmark. The
+// default transport keeps only two idle connections per host, so at thousands
+// of requests per second the proxy closes and reopens backend sockets
+// constantly and exhausts ephemeral ports on Windows. One shared transport
+// keeps the pooled connections alive for every backend.
+func newProxyTransport() *http.Transport {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          4096,
+		MaxIdleConnsPerHost:   1024,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		DisableCompression:    true,
+	}
 }
 
 func newLoadBalancer(rawBackends []string, strategy, healthPath string) (*loadBalancer, error) {
@@ -56,7 +79,7 @@ func newLoadBalancer(rawBackends []string, strategy, healthPath string) (*loadBa
 		healthPath = "/health"
 	}
 
-	lb := &loadBalancer{strategy: strategy, healthPath: healthPath}
+	lb := &loadBalancer{strategy: strategy, healthPath: healthPath, transport: newProxyTransport()}
 	for _, raw := range rawBackends {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -75,6 +98,7 @@ func newLoadBalancer(rawBackends []string, strategy, healthPath string) (*loadBa
 
 		b := &backend{url: target}
 		b.proxy = httputil.NewSingleHostReverseProxy(target)
+		b.proxy.Transport = lb.transport
 		b.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			// A failed proxy attempt usually means the instance stopped between
 			// the health check and the request. Mark it down; the periodic

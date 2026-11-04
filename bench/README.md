@@ -22,7 +22,7 @@ The test is run with Go. `bench/phase0` is the orchestrator.
 - End-to-end latency at three load levels:
   - warm-up: 50 req/s
   - steady: 278 req/s (1M requests/hour)
-  - peak: 1,000 req/s
+  - peak: 1,000 req/s (default), or 2,000 req/s with `-profile peak-2x-hour`
 - Endpoint mix: 70% portfolio, 15% today, 10% stats, 5% historical.
 - `pg_stat_statements` totals and PostgreSQL settings.
 
@@ -110,6 +110,45 @@ flags:
 # Different database
 .\bench\bin\phase0.exe -quick -database stocky_bench_2
 ```
+
+## Phase 6 one-hour profiles
+
+The built-in profiles all start with a 60 s warm-up at 50 req/s:
+
+| Profile | Steady | Peak | Purpose |
+|---|---|---|---|
+| `-quick` | 2m @ 278 req/s | 1m @ 1,000 req/s | smoke test |
+| `steady-hour` | 1h @ 278 req/s | — | 1M/hour proof |
+| `peak-2x-hour` | — | 1h @ 2,000 req/s | 2× design peak |
+
+Steady proof on one API:
+
+```powershell
+go run ./bench/phase0 -profile steady-hour -app-role api `
+  -skip-seed -skip-plans -skip-rebuild
+```
+
+Peak proof with three APIs behind `bench/lb`, then a 10% reconciliation capped
+at 2,000 users:
+
+```powershell
+go run ./bench/phase0 -profile peak-2x-hour `
+  -app-role api -api-instances 3 `
+  -db-max-open-conns 6 -db-max-idle-conns 6 `
+  -skip-seed -skip-plans -skip-rebuild `
+  -reconcile -reconcile-sample-percent 10 -reconcile-max-users 2000
+```
+
+`-api-instances` starts that many `stocky-api` processes on consecutive ports
+starting at `-port`, plus `bench/lb` on `-lb-port`; the load generator targets
+the load balancer. `-db-max-open-conns` and `-db-max-idle-conns` override the API
+pool for the run. `-api-gomaxprocs`, `-loadgen-gomaxprocs`, and `-lb-gomaxprocs`
+limit the Go scheduler per process; change one variable at a time.
+
+`-reconcile` runs `dbtool reconcile` after the load and writes
+`reconciliation.txt` into the result directory. Bound the sample with
+`-reconcile-sample-percent`, `-reconcile-max-users`, `-reconcile-max-details`,
+and `-reconcile-timeout`.
 
 ## Optional: enable pg_stat_statements
 
@@ -457,6 +496,11 @@ bench/results/phase0-YYYYMMDD-HHMMSS/
   api.out.log / api.err.log  # API logs
 ```
 
+Multi-instance runs add one API log pair and metrics file per port
+(`api-<port>.out.log`, `api-<port>.err.log`, `api-metrics-<port>.txt`), plus
+`lb.out.log`, `lb.err.log`, and `lb-backends.json`. With `-reconcile`, the
+directory also contains `reconciliation.txt`.
+
 `api-metrics.txt` is captured after the load phases. It contains the HTTP
 latency histograms, named-query timings, DB pool gauges/counters, and projection
 health gauges. A missing file is a warning, not a failed run; set
@@ -468,13 +512,16 @@ To tune the pool, compare `stocky_db_pool_wait_count_total` and
 or the database is saturated. Check PostgreSQL CPU and `max_connections` before
 raising `DB_MAX_OPEN_CONNS`.
 
-## Reading the baseline
+## Reading the results
 
-The current design is expected to fail the 1M/hour target. That is the point:
-record the failure, the query plans, and the top SQL statements before changing
-anything.
+The Phase 6 steady profile met the 1M/hour target on the benchmark host with
+wide latency headroom: 1,000,284 requests in one hour, 0 errors, p95 11.2 ms.
+The 2,000 req/s peak profile did not: three APIs behind `bench/lb` sustained
+~1,529 req/s for an hour with p95 861 ms. Short peak smoke runs reached
+~1,895 req/s. Treat the 2,000 req/s figure as a capacity target for larger or
+additional hosts, not as a demonstrated result on one 6-core machine.
 
-Suggested SLO for later comparison:
+Suggested SLO for comparison:
 
 | Metric | Target |
 |---|---|
@@ -484,8 +531,7 @@ Suggested SLO for later comparison:
 | 5xx responses | 0 under sustained load |
 
 If a plan exceeds `-explain-timeout`, `plans.txt` records the error and the
-orchestrator continues to the load test. A timeout is itself a baseline
-finding.
+orchestrator continues to the load test. A timeout is itself a finding.
 
 ## Phase boundary
 
@@ -496,4 +542,5 @@ for plan capture; the handler and integration tests live outside this directory.
 Phase 4 added the API/jobs pool split, request deadlines, optional read-replica
 routing, and the `api-metrics.txt` capture. Phase 5 adds ETag/304 handling, the
 optional per-process LRU cache, per-user rate limiting, and the `lb` harness for
-multi-instance runs.
+multi-instance runs. Phase 6 adds the one-hour steady and peak profiles,
+multi-instance pool overrides, and the post-run reconciliation capture.

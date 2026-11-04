@@ -404,6 +404,54 @@ adjustment latency. `rebuild-check` runs `rebuild-projections --online` while
 writers create rewards and adjustments, then verifies that no projection drifted
 and that the quiesced fixture still reconciles.
 
+### Capacity and load-test results
+
+Phase 6 measured the read path on one host (Intel i5-12400F, 6 cores /
+12 threads, 8 GB RAM; PostgreSQL 17 local, `shared_buffers=128 MB`) against the
+20,000-user / 500,000-reward benchmark seed. Both runs used `APP_ROLE=api`,
+`-skip-seed -skip-plans -skip-rebuild`, and a 60 s warm-up.
+
+| Profile | Topology | Requests | Errors | p50 / p95 / p99 | Throughput |
+|---|---|---:|---:|---|---:|
+| Steady, 1 hour @ 278 req/s | 1 API | 1,000,284 | 0 | 3.1 / 11.2 / 16.8 ms | 278 req/s |
+| Peak, 1 hour @ 2,000 req/s | 3 APIs + `bench/lb`, pool 6 | 5,503,355 | 325 (0.0059%) | 96.3 / 861.4 / 1,706.5 ms | ~1,529 req/s |
+
+The 1M/hour target is met with wide headroom: every steady request returned
+`200`, and per-route p95 stayed between 5 ms and 25 ms. The 2× peak target was
+not reached on this machine; the run was CPU- and pool-bound, and round-robin
+queueing was skewed across the three API processes. Short 60 s peak bursts
+reached ~1,895 req/s. Database capacity is the first constraint: a 3×25
+connection pool collapsed to ~835 req/s, while 3×6 was best.
+
+Reconciliation after the peak run checked 2,000 users (10% sample) in 10.6 s
+with 0 mismatches. `projection_factor_status()` showed 3,006 stale factors
+because `APP_ROLE=api` skips the corporate-action job; the read path uses the
+safe fallback, and a `worker` or `all` process refreshes the cache.
+
+Known limits:
+
+- The 2,000 req/s peak is not demonstrated on the single benchmark host; the
+  sustained ceiling was ~1,529 req/s.
+- `pg_stat_statements` is not preloaded, so server-side query totals were
+  unavailable; use the captured plans instead.
+- Cache and rate limits are per process; aggregate limits scale with replicas.
+- Long peak runs write very large request logs (~192 MB per API); rotate them.
+
+Reproduce the proof with:
+
+```powershell
+go run ./bench/phase0 -profile steady-hour -app-role api `
+  -skip-seed -skip-plans -skip-rebuild
+
+go run ./bench/phase0 -profile peak-2x-hour -app-role api -api-instances 3 `
+  -db-max-open-conns 6 -db-max-idle-conns 6 `
+  -skip-seed -skip-plans -skip-rebuild `
+  -reconcile -reconcile-sample-percent 10 -reconcile-max-users 2000
+```
+
+Results are in `bench/results/phase0-steady-hour-20261104-194320/` and
+`bench/results/phase0-peak-2x-hour-20261104-204525/`.
+
 ---
 
 ## Running the Project
